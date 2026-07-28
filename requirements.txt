@@ -1,0 +1,4 @@
+requests==2.32.3
+# kafka-python-ng 是 kafka-python 的维护分支，支持 Python 3.12+
+# （原 kafka-python 2.0.2 在 3.12 上有 vendored six 的兼容问题）
+kafka-python-ng==2.2.3

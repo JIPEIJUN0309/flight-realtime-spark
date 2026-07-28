@@ -1,0 +1,36 @@
+# 凭证 —— 绝不上传
+.env
+
+# 数据文件
+data/
+*.csv
+*.parquet
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Spark / Delta 本地产物
+spark-warehouse/
+checkpoint*/
+_delta_log/
+*.crc
+
+# Airflow 本地状态
+airflow/logs/
+airflow/airflow.db
+airflow/airflow.cfg
+
+# 学习笔记（不公开）
+STAGE*_GUIDE.md
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+# 机场维表是运行必需的小型参考数据，需要上传
+!dim/airports.csv

@@ -1,0 +1,119 @@
+# ============================================================
+# 阶段（可选）：Airflow 自动化下游批处理
+# ------------------------------------------------------------
+# 这是一套【独立】的 compose，专门跑 Airflow，用来把手动的
+# DWD → DWS → ADS 刷新流程（《接力速查手册》3.4）自动化成定时调度。
+#
+# 设计要点：
+#   1. 独立 project name（flight-airflow），不和主栈、也不和天气项目抢。
+#   2. 容器名一律 flight-airflow-*，端口用 8081（天气项目 Airflow 占 8080）。
+#   3. Airflow 自己带一个元数据库 airflow-postgres（只在内网，不映射端口，
+#      不碰主栈那个业务库 postgres:5432）。
+#   4. 只挂 /var/run/docker.sock —— Airflow 靠它 docker exec 已经在跑的
+#      spark 容器，不需要加入主栈的网络。
+#
+# 启动方式（主栈要先起来，spark 容器得在）：
+#   docker compose up -d                                   # 主栈
+#   docker compose -f docker-compose.airflow.yml up -d --build   # Airflow
+# ============================================================
+name: flight-airflow
+
+# ---- 公共配置锚点：三个 airflow 服务共用 ----
+x-airflow-common: &airflow-common
+  build: ./airflow
+  image: flight-airflow:2.10.5
+  environment: &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    # webserver 与 scheduler 必须共用同一套密钥，否则会话/加密对不上
+    AIRFLOW__CORE__FERNET_KEY: "mgkyGiQYdk7LMvHvz_JmZw5BFM3Pu2WDWrugoJruIxg="
+    AIRFLOW__WEBSERVER__SECRET_KEY: "flight-airflow-demo-secret"
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+    # 关掉没必要的健康告警噪音
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+    # ★ 关键：把宿主 Docker socket 挂进来，Airflow 才能 docker exec spark
+    - /var/run/docker.sock:/var/run/docker.sock
+  # uid:gid = 50000:0。gid 0（root 组）是为了能读写 docker.sock。
+  # 若宿主是原生 Linux 且遇到 socket 权限问题，见指南“坑一”。
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
+services:
+  # ---------- Airflow 元数据库（独立，不碰业务库）----------
+  airflow-postgres:
+    image: postgres:16
+    container_name: flight-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_pg_data:/var/lib/postgresql/data
+    # 故意不映射 host 端口：业务库已占 5432，这个只走内网
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ---------- 一次性初始化：建表 + 建管理员账号 ----------
+  airflow-init:
+    <<: *airflow-common
+    container_name: flight-airflow-init
+    # 覆盖入口，做完就退出
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        set -e
+        echo "[init] 迁移元数据库 ..."
+        airflow db migrate
+        echo "[init] 创建管理员账号 admin/admin ..."
+        airflow users create \
+          --username admin --password admin \
+          --firstname Flight --lastname Admin \
+          --role Admin --email admin@example.com || true
+        echo "[init] 完成。"
+    restart: "no"
+
+  # ---------- Web UI（localhost:8081）----------
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: flight-airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080"    # 宿主 8081（天气项目 Airflow 用 8080）
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ---------- 调度器（LocalExecutor 下任务就在这里跑）----------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: flight-airflow-scheduler
+    command: scheduler
+    restart: unless-stopped
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow_pg_data:

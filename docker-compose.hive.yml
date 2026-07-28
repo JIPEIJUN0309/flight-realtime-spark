@@ -1,0 +1,85 @@
+# ============================================================
+# 阶段七：Hive on Tez 环境（和 Spark 做同逻辑性能对比）
+# ------------------------------------------------------------
+# 独立一套 compose，接近真实的 Hive 架构：
+#   flight-hive-metastore-db  —— 真实 Postgres 元数据库（不是内嵌 Derby）
+#   flight-hive-metastore     —— Hive Metastore 服务（thrift://:9083）
+#   flight-hive-server2       —— HiveServer2，默认 Tez 引擎，beeline 连 :10000
+#
+# 设计要点：
+#   1. 独立 project name（flight-hive），和主栈 / Airflow / 天气项目互不干扰。
+#   2. 容器名一律 flight-hive-*，端口 9083 / 10000 / 10002（都没和现有服务撞）。
+#   3. 挂载主栈的 ./data 目录到 /flight-data —— Hive 直接读 Spark 导出的
+#      Parquet 文件，两个引擎读的是【同一批物理文件】，对比才公平。
+#
+# 启动（不依赖主栈，可单独起）：
+#   docker compose -f docker-compose.hive.yml up -d --build
+# ============================================================
+name: flight-hive
+
+services:
+  # ---------- Hive 元数据库（真实 Postgres，替代玩具级 Derby）----------
+  hive-metastore-db:
+    image: postgres:16
+    container_name: flight-hive-metastore-db
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+      POSTGRES_DB: metastore
+    volumes:
+      - hive_metastore_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ---------- Hive Metastore 服务 ----------
+  hive-metastore:
+    build: ./hive
+    image: flight-hive:4.0.1
+    container_name: flight-hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      # 首次启动会自动 schematool -initSchema 建元数据表（因为没设 IS_RESUME）
+      SERVICE_OPTS: >-
+        -Xmx1G
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://hive-metastore-db:5432/metastore
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+    ports:
+      - "9083:9083"
+    volumes:
+      - warehouse:/opt/hive/data/warehouse
+      - ./data:/flight-data       # ★ 读 Spark 导出的 Parquet
+    depends_on:
+      hive-metastore-db:
+        condition: service_healthy
+
+  # ---------- HiveServer2（beeline / JDBC 入口，Tez 引擎）----------
+  hive-server2:
+    build: ./hive
+    image: flight-hive:4.0.1
+    container_name: flight-hive-server2
+    environment:
+      SERVICE_NAME: hiveserver2
+      IS_RESUME: "true"           # 元数据已由 metastore 初始化，这里别再 init
+      SERVICE_OPTS: >-
+        -Xmx2G
+        -Dhive.metastore.uris=thrift://hive-metastore:9083
+    ports:
+      - "10000:10000"             # HiveServer2 Thrift（beeline 连这个）
+      - "10002:10002"             # HiveServer2 Web UI
+    volumes:
+      - warehouse:/opt/hive/data/warehouse
+      - ./data:/flight-data       # ★ 和 metastore 挂同一份，读同一批 Parquet
+      - ./hive_vs_spark:/bench:ro # 阶段七的基准 SQL，供 beeline -f 读取
+    depends_on:
+      hive-metastore:
+        condition: service_started
+
+volumes:
+  hive_metastore_db:
+  warehouse:

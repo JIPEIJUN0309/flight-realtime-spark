@@ -1,0 +1,21 @@
+iata,icao,airport_name,city,country,latitude,longitude
+FRA,EDDF,Frankfurt Airport,Frankfurt,Germany,50.03333,8.57056
+MUC,EDDM,Munich Airport,Munich,Germany,48.35389,11.78611
+ZRH,LSZH,Zurich Airport,Zurich,Switzerland,47.4647,8.54917
+VIE,LOWW,Vienna International Airport,Vienna,Austria,48.11028,16.56972
+GVA,LSGG,Geneva Airport,Geneva,Switzerland,46.23806,6.10894
+BSL,LFSB,EuroAirport Basel-Mulhouse,Basel,Switzerland,47.59,7.52944
+STR,EDDS,Stuttgart Airport,Stuttgart,Germany,48.68987,9.22196
+LYS,LFLL,Lyon-Saint Exupery Airport,Lyon,France,45.72564,5.08111
+MXP,LIMC,Milan Malpensa Airport,Milan,Italy,45.63,8.72306
+LIN,LIML,Milan Linate Airport,Milan,Italy,45.44944,9.27833
+TRN,LIMF,Turin Airport,Turin,Italy,45.20081,7.64963
+NUE,EDDN,Nuremberg Airport,Nuremberg,Germany,49.4987,11.07806
+SXB,LFST,Strasbourg Airport,Strasbourg,France,48.53831,7.62823
+BRN,LSZB,Bern Airport,Bern,Switzerland,46.91410,7.49711
+INN,LOWI,Innsbruck Airport,Innsbruck,Austria,47.26017,11.34397
+SZG,LOWS,Salzburg Airport,Salzburg,Austria,47.79337,13.00431
+FDH,EDNY,Friedrichshafen Airport,Friedrichshafen,Germany,47.67130,9.51150
+DTM,EDLW,Dortmund Airport,Dortmund,Germany,51.51833,7.61222
+CGN,EDDK,Cologne Bonn Airport,Cologne,Germany,50.86589,7.14274
+LUX,ELLX,Luxembourg Airport,Luxembourg,Luxembourg,49.62330,6.21152
