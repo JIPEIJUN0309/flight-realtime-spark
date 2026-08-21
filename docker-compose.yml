@@ -2,6 +2,13 @@
 # 阶段二：Kafka + Spark + PostgreSQL + Metabase 全套
 # （在阶段一 Kafka 基础上，新增 spark / postgres / metabase）
 # ============================================================
+
+# 固定 project 名，不随所在目录名变化。
+# 否则 compose 拿目录名当 project 名，一旦目录改名或移动，named volume
+# 前缀就变了 —— kafka_data / postgres_data 会失联，Metabase 看板和
+# Kafka 里的数据全部对不上。
+name: flight-realtime-spark
+
 services:
   # ---------- Kafka (KRaft 模式) ----------
   kafka:
