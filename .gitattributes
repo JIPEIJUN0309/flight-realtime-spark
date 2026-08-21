@@ -1,0 +1,26 @@
+# ============================================================
+# 行尾策略：凡是要进 Linux 容器的文件，一律 LF。
+# Windows 的 core.autocrlf 会在 checkout 时把它们转成 CRLF，
+# 而容器里的解析器不会帮你去掉那个 \r：
+#
+#   .env.example  → 复制成 .env 后，compose 的 env_file 把 \r 带进变量值，
+#                   OPENSKY_CLIENT_SECRET=xxx\r 会让 OAuth 认证失败，
+#                   而且报错信息完全看不出是行尾问题，极难排查
+#   Dockerfile    → RUN 的续行与 shell 命令被 \r 破坏
+#   *.sh          → shebang 变成 "#!/usr/bin/env bash\r"，报 bad interpreter
+#   *.csv         → 末列值多一个 \r，Spark inferSchema 会解析成字符串或 null
+#   *.yml/*.py/*.sql → 统一，顺便消除 diff 噪音
+# ============================================================
+*.sh          text eol=lf
+*.env         text eol=lf
+.env.example  text eol=lf
+Dockerfile    text eol=lf
+*.yml         text eol=lf
+*.yaml        text eol=lf
+*.py          text eol=lf
+*.sql         text eol=lf
+*.csv         text eol=lf
+
+# 批处理相反：必须 CRLF，LF 会让某些 CMD 版本解析 goto/label 出错
+*.cmd         text eol=crlf
+*.bat         text eol=crlf
