@@ -192,6 +192,8 @@ Alerting takes a quantile of the reconstruction-error distribution rather than a
 
 `ml_eval.py` prints the full three-way comparison, the recall/false-positive trade-off across thresholds and debounce settings, and the per-feature attribution.
 
+Running instructions, the implementation decisions behind the module, and its known limitations are in [`docs/anomaly-detection.md`](docs/anomaly-detection.md).
+
 ### Pipeline Integration
 
 Inference runs in the same batch chain and reuses the serving layer's `MERGE` helper with delete-on-missing semantics, since alerts are recomputed from the full source — changing the model or the threshold has to retire the previous run's rows rather than leave them behind. Results land in `ads_ml_anomaly` next to the existing rule alerts on the same time axis, so the two judgements can be compared directly in the dashboard.
