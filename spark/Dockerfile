@@ -27,6 +27,20 @@ RUN set -e; \
     curl -fSL -o commons-pool2-2.11.1.jar            "$BASE/org/apache/commons/commons-pool2/2.11.1/commons-pool2-2.11.1.jar"; \
     curl -fSL -o postgresql-42.7.10.jar              "$BASE/org/postgresql/postgresql/42.7.10/postgresql-42.7.10.jar"
 
+# ============================================================
+# 阶段九：时序异常检测模块的 Python 依赖
+# ------------------------------------------------------------
+# ★ torch 必须走 CPU 专用索引。
+#   PyPI 上 Linux 版的 torch 默认带 CUDA，会连带拉进来 ~2.5GB
+#   的 nvidia-* 显卡库。这个容器只做 CPU 推理，用不上，
+#   走 /whl/cpu 索引装下来只有 ~200MB。
+#
+#   如果公司网络访问不了 download.pytorch.org，把下面那行换成
+#   普通的 `pip install --no-cache-dir torch`，功能一样，就是镜像大很多。
+# ============================================================
+RUN pip install --no-cache-dir numpy pandas pyarrow scikit-learn && \
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
+
 WORKDIR /opt/spark/work-dir
 
 # 保持容器常驻，方便我们用 docker exec 进去手动 spark-submit

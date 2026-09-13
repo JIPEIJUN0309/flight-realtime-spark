@@ -18,6 +18,7 @@
 - [Data Source](#data-source)
 - [Pipeline Layers](#pipeline-layers)
 - [Key Results](#key-results)
+- [Anomaly Detection](#anomaly-detection)
 - [Quick Start](#quick-start)
 - [Project Structure](#project-structure)
 - [Technical Highlights](#technical-highlights)
@@ -125,14 +126,77 @@ The default 200 shuffle partitions badly over-partition a dataset this size — 
 
 ### 4. Orchestrated Batch Path
 
-An Airflow DAG (`preflight → dwd_silver → dws_gold_batch → ads_export`) replaces three manually-issued Spark commands, running every 15 minutes.
+An Airflow DAG replaces a sequence of manually-issued Spark commands, running every 15 minutes:
+
+```
+preflight → dwd_silver → dws_gold_batch → ads_export → ml_features → ml_score
+```
 
 | Metric | Value |
 |--------|-------|
 | Runs verified (manual + scheduled) | 2 / 2 successful |
 | Average runtime | ~2 min 37 s |
 
+*Timings were measured on the four-task chain, before the two anomaly-detection tasks were added.*
+
 `max_active_runs=1` prevents overlapping runs from writing over each other, and retries are configured per task — the pipeline is safe to re-run at any point.
+
+---
+
+## Anomaly Detection
+
+The serving layer already flagged anomalies with fixed thresholds. That rule path had a specific failure mode, and it is what motivated the model.
+
+The first threshold for "rapid climb" was 15 m/s. Over 32,581 records it raised 623 alerts — a 1.9% alert rate. But 15 m/s is 2,953 ft/min, a perfectly normal initial climb for an airliner: the rule was alerting on takeoff. Recalibrating to 25 m/s using domain knowledge dropped it to a handful.
+
+That fixed the constant, not the method. Fixed thresholds have three limits:
+
+- **They judge one row at a time.** A single 26 m/s sample can be normal; three minutes of oscillating climb rate is not. A row-level predicate cannot tell those apart.
+- **Every anomaly shape needs its own rule.** Altitude jumps, speed steps, position drift and reporting gaps are four separate predicates, and the list is not known in advance.
+- **One constant cannot fit every aircraft and flight phase.** Normal climb rate differs by an order of magnitude between them.
+
+So this module stops encoding *what counts as abnormal* and instead learns *what normal looks like*.
+
+### Approach
+
+An **LSTM autoencoder** over sequences of 20 consecutive samples — 10 minutes at a 30-second poll interval — across eight per-sample features: altitude, ground speed, vertical rate, acceleration, rate of change of vertical rate, turn rate, the residual between GPS-derived and reported speed, and the sampling-gap ratio.
+
+The model is trained only to reconstruct its input. Reconstruction error becomes the anomaly score: sequences that do not lie on the manifold of normal flight are the ones it cannot reproduce.
+
+An autoencoder rather than a classifier because **there are no labels**. No public ADS-B dataset carries anomaly annotations, and the same holds for most industrial telemetry — normal data is plentiful, real faults are rare and unlabelled. Self-supervised reconstruction needs only the assumption that most data is normal.
+
+**The latent dimension is chosen by sweep, not assumption.** This is the method's principal failure mode: too wide and the autoencoder approaches an identity map, reconstructing anomalies as faithfully as normal data; too narrow and it reconstructs nothing. Note that lower validation reconstruction loss is *not* the selection criterion — low loss is often precisely the symptom of an over-wide bottleneck. The sweep selects on separation instead.
+
+Splits are made **by aircraft, not by window**. With a stride of 5 over a window of 20, adjacent windows overlap 75%; a random window-level split puts near-identical sequences on both sides and inflates validation scores.
+
+### Evaluation
+
+`spark/ml_eval.py` compares three methods on the same held-out set:
+
+| Method | Models the sequence? | Needs labels? |
+|--------|----------------------|---------------|
+| Fixed thresholds (the existing rule) | No | No |
+| Isolation Forest | No — window aggregates only | No |
+| LSTM autoencoder | Yes | No |
+
+Isolation Forest is the informative baseline: it sees mean, standard deviation, min and max per feature, which discards ordering entirely — "rises then falls" and "falls then rises" collapse to the same vector. The gap between it and the autoencoder is the measurable value of modelling the sequence.
+
+Scoring uses **PR-AUC rather than ROC-AUC**. Anomaly detection is severely imbalanced, and ROC's false-positive rate is diluted by an enormous negative class: a large absolute number of false alerts still reads as a small FPR.
+
+Labels come from two directions, because neither is sufficient alone:
+
+- **Synthetic injection** measures recall. Four anomaly shapes — altitude step, speed drop, position drift, reporting gap — are injected into held-out normal sequences at the *raw column* level, so the effect propagates through feature derivation rather than being written directly into the derived features.
+- **A real false-positive regression set** measures over-firing. Windows whose peak vertical rate falls between the old 15 m/s threshold and the corrected 25 m/s one are precisely the alerts the first rule raised and domain knowledge later cleared as normal climbs — a set of human-confirmed negatives. A model that ranks them highly has only relearned the bad rule. Synthetic injection cannot test for this.
+
+Alerting takes a quantile of the reconstruction-error distribution rather than an absolute cutoff — the original 1.9% alert rate came from guessing a constant — and requires N consecutive windows above threshold before firing, the standard debounce against single-sample spikes. Reconstruction error is also decomposed per feature, so an alert carries which signal drove it rather than only a score.
+
+`ml_eval.py` prints the full three-way comparison, the recall/false-positive trade-off across thresholds and debounce settings, and the per-feature attribution.
+
+### Pipeline Integration
+
+Inference runs in the same batch chain and reuses the serving layer's `MERGE` helper with delete-on-missing semantics, since alerts are recomputed from the full source — changing the model or the threshold has to retire the previous run's rows rather than leave them behind. Results land in `ads_ml_anomaly` next to the existing rule alerts on the same time axis, so the two judgements can be compared directly in the dashboard.
+
+**Training is deliberately not scheduled.** Inference reruns on every batch; training is an occasional model-iteration step that needs a human to read the sweep and decide whether to promote a new model. Scheduling it every 15 minutes would silently swap the production model several times an hour and make any regression impossible to trace.
 
 ---
 
@@ -204,6 +268,8 @@ flight-realtime-spark/
 | **Non-equi join** | Haversine distance + `ROW_NUMBER()` resolves nearest airport | Silver |
 | **Delta MERGE** | Idempotent upsert into the serving table — safe to re-run | Serving |
 | **`max_active_runs=1`** | Prevents concurrent DAG runs from overwriting each other | Orchestration |
+| **LSTM autoencoder** | Unsupervised sequence anomaly detection scored by reconstruction error | Anomaly |
+| **Circular difference** | Normalises heading deltas across the 0°/360° boundary | Anomaly |
 
 ---
 
@@ -230,6 +296,14 @@ Real problems encountered and fixed during development.
 
 6. **Python 3.12 incompatibility in the Kafka client.**
    The long-standing `kafka-python` package does not support Python 3.12+. Switched to the maintained `kafka-python-ng` fork.
+
+7. **Heading is a circular quantity, and differencing it naively poisoned the features.**
+   `true_track` is reported in 0–360 degrees. A turn from 359° to 1° is +2 degrees, but plain subtraction yields −358 — so every crossing of due north registered as a violent manoeuvre and dominated the turn-rate feature. Normalising the difference to (−180, 180] fixed it.
+   *Lesson: angles, timestamps and any other wrapping quantity need their own difference operator.*
+
+8. **Duplicate rows silently corrupted the derived features.**
+   Re-running the bronze stream with a fresh checkpoint re-consumes Kafka, so silver can hold more than one row per `(icao24, event_time)`. Every feature divided by the sampling interval then divides by zero. The serving layer had already hit this as a loud `MERGE` error; in the feature path it fails quietly, which is worse. Deduplication now happens explicitly in `ml_features.py`.
+   *Lesson: the same upstream defect surfaces as a crash in one consumer and as bad numbers in another.*
 
 ---
 
