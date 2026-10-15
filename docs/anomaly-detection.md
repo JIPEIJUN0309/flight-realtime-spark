@@ -22,7 +22,13 @@ python opensky_producer.py
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py
 ```
 
-Target roughly **60+ consecutive samples per aircraft** (about half an hour of track). `ml_features.py` reports whether the data reaches that and says so explicitly if it does not.
+Collection readiness is measured by **how many aircraft have enough points**, not by total row count: 100k rows spread over 5,000 aircraft yields almost no windows, while 50k rows over 800 aircraft is ample. `check_collection.py` reports that figure directly and can be run at any time without disturbing the running collector:
+
+```bash
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/check_collection.py
+```
+
+Aim for **300+ aircraft with 30 or more valid samples each**.
 
 ### 2. Rebuild the Spark image
 
@@ -42,6 +48,11 @@ The JAR-download layer is cached, so only the pip layer is rebuilt.
 ## Running
 
 ```bash
+# 0. Rebuild silver from the freshly collected bronze data.
+#    ml_features reads silver, not bronze — skipping this step
+#    silently trains on whatever silver held from a previous run.
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_silver.py
+
 # 1. Extract per-aircraft track sequences from silver
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_features.py
 
@@ -50,14 +61,19 @@ docker exec -it spark python3 /opt/spark/work-dir/jobs/ml_train.py
 
 # 3. Evaluate — three-way comparison, threshold selection, attribution
 docker exec -it spark python3 /opt/spark/work-dir/jobs/ml_eval.py
-
-# 4. Score and publish to the serving layer
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_score.py
 ```
 
 Steps 2 and 3 use `python3` rather than `spark-submit`: they read Parquet directly and need no JVM.
 
-Steps 1 and 4 are wired into the `flight_batch_pipeline` DAG after `ads_export`. Training and evaluation are not — see [Training is not scheduled](#training-is-not-scheduled).
+That is everything needed to produce the evaluation numbers. To also publish alerts to the dashboard, run the serving chain:
+
+```bash
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_batch.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ads_export.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_score.py
+```
+
+`ml_features` and `ml_score` are wired into the `flight_batch_pipeline` DAG after `ads_export`, so this sequence runs itself once the DAG is enabled. Training and evaluation are not — see [Training is not scheduled](#training-is-not-scheduled).
 
 ---
 
@@ -65,6 +81,7 @@ Steps 1 and 4 are wired into the `flight_batch_pipeline` DAG after `ads_export`.
 
 | File | Runs via | Responsibility |
 |------|----------|----------------|
+| `spark/check_collection.py` | `spark-submit` | Collection readiness — how many aircraft have enough samples yet |
 | `spark/ml_common.py` | imported | Feature derivation, windowing, anomaly injection, model definition |
 | `spark/ml_features.py` | `spark-submit` | silver → dedup + continuity filter → track sequences (Parquet) |
 | `spark/ml_train.py` | `python3` | Windowing, latent sweep, final training |
