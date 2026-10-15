@@ -5,7 +5,7 @@
 # 为什么需要 docker CLI？
 #   本项目所有 Spark 作业都是用
 #       docker exec spark /opt/spark/bin/spark-submit <job>.py
-#   跑的（见《接力速查手册》3.3）。Airflow 要自动化这套流程，
+#   跑的。Airflow 要自动化这套流程，
 #   最忠实的方式就是让它在 DAG 里敲同样的命令——所以 Airflow
 #   容器里需要一个 docker 客户端，通过挂载的 /var/run/docker.sock
 #   去操控宿主机上已经在跑的 spark 容器。

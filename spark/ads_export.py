@@ -5,9 +5,9 @@
 
 【这一层的两个技术核心】
 
-★ 1. Delta MERGE（UPSERT）—— 实时版 SCD Type 1 / 拉链表
-   传统数仓里，"每个实体只保留最新状态"要靠拉链表 + 全量重写，很重。
-   Delta 的 MERGE 让你一条语句就能做到：
+★ 1. Delta MERGE（UPSERT）—— SCD Type 1：只保留最新状态
+   在 Hive 这类不支持行级更新的表上，"每个实体只保留最新状态"通常要全量重写整张表。
+   Delta 的 MERGE 一条语句就能做到：
        匹配上了 → UPDATE（更新为最新状态）
        没匹配上 → INSERT（新实体入表）
    而且是 ACID 的，不会读到中间状态。
@@ -115,7 +115,7 @@ def merge_into_delta(spark: SparkSession, df: DataFrame,
             规则一改，旧规则算出的告警就是垃圾，必须清掉。
 
     ================================================================
-    【我踩过的坑（可讲）】
+    【踩过的坑】
     第一版我只写了 MATCHED / NOT MATCHED 两个分支，以为 MERGE 会让
     目标表和源保持一致。结果把告警阈值从 15 调到 25、重算只剩 2 条告警后，
     表里【依然是 623 条】—— 因为 upsert 永远不删除，621 条旧规则的误报
@@ -189,7 +189,7 @@ def main():
     #      每架飞机(icao24)只保留一条最新记录：
     #        - 已存在的飞机 → UPDATE 成新位置
     #        - 新出现的飞机 → INSERT
-    #      这正是"拉链表/SCD Type 1"的实时版，一条 MERGE 搞定。
+    #      这就是 SCD Type 1：只保留最新状态、不留历史，一条 MERGE 搞定。
     # ================================================================
     latest_pos_sql = """
     WITH ranked AS (
@@ -329,8 +329,8 @@ def main():
         -- ★ 必须去重！MERGE 的源表如果对同一个目标行有多条匹配，
         --   Delta 会直接报错：
         --   "Cannot perform Merge as multiple source rows matched..."
-        --   silver 里可能存在重复（例如 ODS 流用新 checkpoint 重跑过、
-        --   重复消费了 Kafka），所以这里按 MERGE 键先去重，保证幂等。
+        --   silver 已按 (icao24, event_time) 去重，这里再按 MERGE 键去重一次，
+        --   是防御性的：上游逻辑变了，MERGE 也不会因为重复键失败。
         SELECT *,
             ROW_NUMBER() OVER (
                 PARTITION BY icao24, event_time, alert_type

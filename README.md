@@ -1,6 +1,6 @@
 # Real-Time Flight Data Platform
 
-> A streaming + batch lakehouse pipeline built on **Kafka + Spark + Delta Lake**, ingesting live flight telemetry from the OpenSky Network and serving it to a real-time dashboard — with an offline batch path orchestrated by Airflow.
+> A streaming + batch lakehouse pipeline built on **Kafka + Spark + Delta Lake**: live flight telemetry from the OpenSky Network is ingested in real time, refined in Delta Lake, and served to a dashboard that an Airflow batch path refreshes every 15 minutes.
 
 ![Spark](https://img.shields.io/badge/Spark-Structured%20Streaming-E25A1C?logo=apachespark&logoColor=white)
 ![Kafka](https://img.shields.io/badge/Kafka-KRaft-231F20?logo=apachekafka&logoColor=white)
@@ -23,12 +23,13 @@
 - [Project Structure](#project-structure)
 - [Technical Highlights](#technical-highlights)
 - [Engineering Challenges Solved](#engineering-challenges-solved)
+- [Known Limitations](#known-limitations)
 
 ---
 
 ## What This Project Does
 
-This project pulls **live aircraft state vectors** from the OpenSky Network, buffers them through Kafka, and refines them through a Delta Lake medallion architecture into metrics that drive a real-time dashboard.
+This project pulls **live aircraft state vectors** from the OpenSky Network, buffers them through Kafka, and refines them through a Delta Lake medallion architecture into metrics for a dashboard refreshed every 15 minutes.
 
 ```
 OpenSky API  →  Kafka  →  Spark Structured Streaming  →  Delta Lake (bronze → silver → gold)
@@ -36,12 +37,12 @@ OpenSky API  →  Kafka  →  Spark Structured Streaming  →  Delta Lake (bronz
                                             PostgreSQL  →  Metabase dashboard
 ```
 
-Two paths run over the same lakehouse tables:
+Two paths share the same Kafka topic and lakehouse:
 
-- **Streaming path** — Structured Streaming consumes Kafka continuously, landing raw records in the bronze layer and maintaining windowed aggregates with watermarking.
-- **Batch path** — Airflow orchestrates a scheduled Spark job over the same Delta tables, producing the serving layer idempotently.
+- **Streaming path** — Structured Streaming consumes Kafka continuously. One query lands raw records in the bronze layer, exactly-once through its checkpoint and Delta's transactional sink. Another keeps 5-minute windowed aggregates with a 2-minute watermark and writes them to Delta (`gold_overview_stream`); these are not wired to the dashboard yet.
+- **Batch path** — every 15 minutes Airflow runs the silver → gold → ADS jobs over the Delta tables. ADS tables are updated with Delta `MERGE` and then copied to PostgreSQL for the dashboard.
 
-Running both against identical logic makes the trade-offs between streaming and batch measurable rather than theoretical.
+Running both makes the trade-offs between streaming and batch — exact versus approximate distinct counts, latency versus completeness — measurable rather than theoretical.
 
 ---
 
@@ -81,24 +82,24 @@ The API enforces a **4,000 requests/day** free-tier quota. A bounding box over E
 
 | Layer | Role | Key Processing |
 |-------|------|----------------|
-| **Bronze** | Raw landing | Structured Streaming writes Kafka payloads to Delta as-is |
-| **Silver** | Cleaned detail | Drop on-ground records, null coordinates, implausible altitude/velocity; derive typed columns |
-| **Gold** | Aggregates | 5-minute tumbling windows with watermarking; traffic density and anomaly signals |
-| **Serving** | Application | Delta `MERGE` into PostgreSQL, consumed by Metabase |
+| **Bronze** | Raw landing | Structured Streaming writes Kafka payloads to Delta as-is, plus Kafka offset and ingest time |
+| **Silver** | Cleaned detail | Drop on-ground records, null coordinates, implausible altitude/velocity; derive typed columns; nearest airport |
+| **Gold** | Aggregates | 5-minute tumbling windows — batch tables with exact distinct counts; a streaming table with a 2-minute watermark and HLL counts |
+| **ADS / Serving** | Application | Delta `MERGE` into ADS tables, then a JDBC overwrite into PostgreSQL, consumed by Metabase |
 
 ### Nearest-Airport Enrichment
 
-The silver layer joins each aircraft against an airport dimension table using a **non-equi join**: the Haversine great-circle distance is computed against candidate airports, then `ROW_NUMBER()` picks the closest one per aircraft. This yields both the nearest airport and its distance without a pre-built spatial index.
+The silver layer cross-joins each aircraft position with a 20-row airport dimension table — there is no equality key, so Spark plans it as a broadcast nested loop join. The Haversine great-circle distance is computed for every candidate airport, then `ROW_NUMBER()` partitioned by `(icao24, event_time)` keeps the closest one. This yields both the nearest airport and its distance without a spatial index, and leaves exactly one row per `(icao24, event_time)`.
 
 ---
 
 ## Key Results
 
-### 1. Streaming vs. Batch, Same Logic
+### 1. Streaming vs. Batch
 
-Both paths compute identical 5-minute window aggregates over the same Delta tables, which exposes where the two models genuinely differ.
+Both paths compute 5-minute window aggregates of the same metrics, which exposes where the two models genuinely differ.
 
-The streaming version uses `approx_count_distinct` rather than exact distinct counts: on an unbounded stream, exact distinct state grows without limit, so a mergeable HyperLogLog sketch trades a small error for bounded memory. The batch version, operating on a finite partition, computes exact counts.
+Structured Streaming does not support distinct aggregations — `countDistinct` fails at analysis time — so the streaming version uses `approx_count_distinct` (HyperLogLog, about 5% relative error by default). Window state is bounded by the watermark either way. The batch version computes exact `COUNT(DISTINCT)`, so the two can be compared directly.
 
 ### 2. Engine Comparison — Spark SQL vs. Hive on Tez
 
@@ -113,7 +114,7 @@ Outputs were cross-validated between the two engines and matched exactly.
 
 ### 3. Spark Tuning — Measured, Not Assumed
 
-Identical 4.1M-row workload, configuration changes only:
+Identical 4.1M-row workload (the collected data scaled 30x), configuration changes only:
 
 | Change | Speedup |
 |--------|---------|
@@ -218,22 +219,28 @@ Inference runs in the same batch chain and reuses the serving layer's `MERGE` he
 # 1. Configure credentials
 cp .env.example .env          # then fill in client_id / client_secret
 
-# 2. Start Kafka (KRaft mode)
+# 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Metabase
 docker compose up -d
-docker compose ps             # wait until kafka / kafka-ui are healthy
+docker compose ps             # wait until kafka is healthy
 
 # 3. Start the producer
 pip install -r requirements.txt
 python opensky_producer.py
 
-# 4. Start the Spark streaming jobs
-#    (bronze ingest, silver cleanse, gold aggregation)
+# 4. Start the streaming jobs, each in its own terminal
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_stream.py   # optional
 
-# 5. Optional: bring up the batch orchestration stack
+# 5. Batch path: silver -> gold -> ADS (by hand, or let Airflow run it every 15 minutes)
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_silver.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_batch.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ads_export.py
+
+# 6. Optional: bring up the Airflow stack
 docker compose -f docker-compose.airflow.yml up -d
 ```
 
-Web UIs: Kafka UI at `http://localhost:8080` · Airflow at `http://localhost:8081`
+Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` · Metabase `http://localhost:3001` · Airflow `http://localhost:8081`
 
 ---
 
@@ -242,7 +249,7 @@ Web UIs: Kafka UI at `http://localhost:8080` · Airflow at `http://localhost:808
 ```
 flight-realtime-spark/
 ├── README.md
-├── docker-compose.yml            # Kafka (KRaft) + Kafka UI
+├── docker-compose.yml            # Kafka (KRaft), Kafka UI, Spark, PostgreSQL, Metabase
 ├── docker-compose.hive.yml       # Hive on Tez, for the engine comparison
 ├── docker-compose.airflow.yml    # Airflow scheduler + webserver
 ├── .env.example                  # Credential template
@@ -252,7 +259,7 @@ flight-realtime-spark/
 ├── spark/                        # Streaming and batch Spark jobs
 ├── dim/                          # Airport dimension table
 ├── airflow/                      # DAG definitions
-├── hive/                         # Hive DDL for the comparison workload
+├── hive/                         # Hive image (PostgreSQL JDBC driver) for the engine comparison
 └── hive_vs_spark/                # Engine benchmark harness
 ```
 
@@ -266,9 +273,9 @@ flight-realtime-spark/
 | **Bounding-box quota control** | Restricts the query region to stay inside the free-tier daily quota | Producer |
 | **Kafka KRaft mode** | Runs Kafka without ZooKeeper — fewer moving parts | Ingestion |
 | **Watermarking** | Bounds late-arriving event state in windowed aggregations | Gold |
-| **HLL approximation** | `approx_count_distinct` keeps streaming distinct-count state bounded | Gold (streaming) |
-| **Non-equi join** | Haversine distance + `ROW_NUMBER()` resolves nearest airport | Silver |
-| **Delta MERGE** | Idempotent upsert into the serving table — safe to re-run | Serving |
+| **HLL approximation** | `approx_count_distinct` stands in for `countDistinct`, which Structured Streaming does not support | Gold (streaming) |
+| **Nearest-airport join** | Cross join with a 20-row airport table (broadcast nested loop), Haversine distance, `ROW_NUMBER()` keeps the closest | Silver |
+| **Delta MERGE** | Idempotent upsert into the Delta ADS tables; alerts use sync semantics (`WHEN NOT MATCHED BY SOURCE DELETE`) | ADS |
 | **`max_active_runs=1`** | Prevents concurrent DAG runs from overwriting each other | Orchestration |
 | **LSTM autoencoder** | Unsupervised sequence anomaly detection scored by reconstruction error | Anomaly |
 | **Circular difference** | Normalises heading deltas across the 0°/360° boundary | Anomaly |
@@ -286,15 +293,15 @@ Real problems encountered and fixed during development.
    The free tier allows 4,000 requests/day. Polling globally at a short interval exhausts it quickly. Constraining the query to a European bounding box and tuning the poll interval brought steady-state usage to ~2,880 requests/day while keeping data roughly 30 seconds fresh.
    *Lesson: rate limits are a design input, not an afterthought.*
 
-3. **Unbounded state in streaming distinct counts.**
-   Exact `count(distinct)` over an unbounded stream accumulates state indefinitely. Switched the streaming path to `approx_count_distinct`, whose HyperLogLog sketches are mergeable and fixed-size, while the batch path retains exact counts.
+3. **Distinct counts are not supported on streams.**
+   Writing `countDistinct` in the streaming job fails at analysis time ("Distinct aggregations are not supported on streaming DataFrames"). Switched the streaming path to `approx_count_distinct`, whose HyperLogLog sketches are fixed-size, while the batch path keeps exact counts. Window state is kept bounded by the watermark, not by the sketch.
    *Lesson: streaming and batch can share logic, but not always the same aggregate functions.*
 
 4. **Default shuffle partitions dominated runtime.**
-   Spark's default of 200 shuffle partitions over-partitions a 4.1M-row workload — per-task scheduling overhead outweighed the actual work. Hand-tuning to 8 gave a 2.9x speedup; enabling AQE reached 2.6x automatically, which is the more maintainable choice as data volume changes.
+   Spark's default of 200 shuffle partitions over-partitions a 4.1M-row workload (the collected data scaled 30x) — per-task scheduling overhead outweighed the actual work. Hand-tuning to 8 gave a 2.9x speedup; enabling AQE reached 2.6x automatically, which is the more maintainable choice as data volume changes.
 
-5. **Overlapping scheduled runs corrupted the serving table.**
-   A 15-minute schedule with occasionally longer runtimes allowed two DAG runs to overlap and write over each other. Fixed with `max_active_runs=1` plus idempotent Delta `MERGE` writes, so any run can safely be retried or backfilled.
+5. **Keeping scheduled runs from overlapping.**
+   silver and gold are overwritten on every run, so two overlapping DAG runs would write over each other. `max_active_runs=1` keeps one run at a time, and overwrite plus idempotent Delta `MERGE` writes make any single run safe to retry.
 
 6. **Python 3.12 incompatibility in the Kafka client.**
    The long-standing `kafka-python` package does not support Python 3.12+. Switched to the maintained `kafka-python-ng` fork.
@@ -303,9 +310,19 @@ Real problems encountered and fixed during development.
    `true_track` is reported in 0–360 degrees. A turn from 359° to 1° is +2 degrees, but plain subtraction yields −358 — so every crossing of due north registered as a violent manoeuvre and dominated the turn-rate feature. Normalising the difference to (−180, 180] fixed it.
    *Lesson: angles, timestamps and any other wrapping quantity need their own difference operator.*
 
-8. **Duplicate rows silently corrupted the derived features.**
-   Re-running the bronze stream with a fresh checkpoint re-consumes Kafka, so silver can hold more than one row per `(icao24, event_time)`. Every feature divided by the sampling interval then divides by zero. The serving layer had already hit this as a loud `MERGE` error; in the feature path it fails quietly, which is worse. Deduplication now happens explicitly in `ml_features.py`.
-   *Lesson: the same upstream defect surfaces as a crash in one consumer and as bad numbers in another.*
+8. **Duplicates after a checkpoint reset.**
+   Re-running the bronze stream with a fresh checkpoint re-consumes Kafka from `earliest`, so bronze ends up with more than one row per `(icao24, event_time)`. Every consumer has to be safe against that: silver keeps one row per key (the nearest-airport `ROW_NUMBER()` partitions on exactly that key), the alert table deduplicates on its `MERGE` key before merging, and `ml_features.py` deduplicates again, because in the feature path a duplicate divides by a zero sampling interval and fails quietly instead of loudly.
+   *Lesson: exactly-once holds only within one checkpoint; every downstream step still needs its own idempotency.*
+
+---
+
+## Known Limitations
+
+- The streaming window aggregates (`gold_overview_stream`) are written to Delta but not served yet; the dashboard follows the 15-minute batch path.
+- The streaming path applies a subset of the batch cleaning rules (no altitude or speed range filters, no airport join). The rules should live in one shared function.
+- PostgreSQL is refreshed with a full JDBC overwrite, which is not atomic: a dashboard query during the write can see an empty table. A staging table plus a transactional swap would fix it.
+- Kafka runs as a single broker with an auto-created topic, so the replication factor is 1 and `acks=all` is effectively `acks=1`.
+- Bronze is written every 30 seconds and its small files are not compacted yet (Delta `OPTIMIZE`).
 
 ---
 

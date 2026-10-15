@@ -112,7 +112,7 @@ def fetch_states(tokens: TokenManager) -> dict:
         print(f"[opensky] 非预期状态码 {resp.status_code}")
         return None
 
-    # 顺便打印剩余额度，方便你盯着别超
+    # 顺便打印剩余额度，便于监控配额
     remaining = resp.headers.get("X-Rate-Limit-Remaining")
     if remaining is not None:
         print(f"[opensky] 本次请求成功，剩余额度 {remaining}")

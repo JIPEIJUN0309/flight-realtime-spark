@@ -1,7 +1,7 @@
 """
 阶段（可选）：Airflow 自动化下游批处理
 =========================================================
-把《接力速查手册》3.4 里"手动跑一遍才能刷新大屏"的流程，
+把"手动依次跑一遍 spark-submit 才能刷新大屏"的流程，
 自动化成一条定时调度的 DAG。
 
 手动流程（原来要人肉依次敲）：
@@ -15,7 +15,7 @@
   1. 只编排【批处理】层。ODS(ods_bronze.py) 是常驻流作业，不归 Airflow 管，
      它和采集器 opensky_producer.py 一样是"一直开着的水龙头"。
   2. 每个任务本质就是敲一条 `docker exec spark spark-submit ...`——
-     和你手动跑的命令一字不差，Airflow 只是替你敲。
+     和手动执行的命令完全一样，Airflow 只是按时、按依赖去执行。
   3. 严格串行 + max_active_runs=1：因为 dwd/dws 是 overwrite 写，
      两次 run 并行会互相踩踏，必须一次只跑一条链。
 
@@ -37,7 +37,7 @@ from airflow.operators.bash import BashOperator
 
 # ---------------------------------------------------------------
 # 所有 Spark 作业的统一跑法：docker exec 进常驻的 spark 容器再 spark-submit。
-# 和《接力速查手册》3.3 完全一致，只是去掉了交互用的 -it。
+# 和手动执行时的命令一致，只是去掉了交互用的 -it。
 # ---------------------------------------------------------------
 SPARK_SUBMIT = "docker exec spark /opt/spark/bin/spark-submit"
 JOBS_DIR = "/opt/spark/work-dir/jobs"

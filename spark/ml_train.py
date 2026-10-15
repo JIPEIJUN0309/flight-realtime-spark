@@ -177,7 +177,7 @@ def main():
     best_latent = best["latent"]
     print(f"\n[train] 选定 latent = {best_latent}（PR-AUC {best['pr_auc']:.4f}）")
 
-    # 把 sweep 现象讲出来 —— 这是讲解里最能体现"理解了方法"的一段
+    # 打印 sweep 现象：重构损失最低的维度，区分度不一定最好
     lo = min(results, key=lambda r: r["val_loss"])
     if lo["latent"] != best_latent:
         print(f"      注意：重构损失最低的是 latent={lo['latent']}"

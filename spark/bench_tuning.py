@@ -158,7 +158,7 @@ def main():
     def pct(base, new):
         return f"省 {(base-new)/base*100:4.1f}%" if new < base else f"慢 {(new-base)/base*100:4.1f}%"
     print("\n" + "=" * 66)
-    print("  调优前后汇总（把这段贴给我）")
+    print("  调优前后汇总")
     print("=" * 66)
     print("  [A] shuffle 分区 & AQE（聚合）:")
     print(f"      A1 200分区(基线) : {a1:6.3f}s")

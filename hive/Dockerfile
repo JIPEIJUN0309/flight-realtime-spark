@@ -9,7 +9,7 @@
 #   所以这里把 postgres 驱动预先放进 /opt/hive/lib。
 #
 # 说明：apache/hive:4.0.1 默认执行引擎就是 Tez（不是老的 MapReduce），
-# 所以这套天生就是"Hive on Tez"，正好对上你淘宝项目的技术栈。
+# 所以这套就是 Hive on Tez。
 # ============================================================
 FROM apache/hive:4.0.1
 

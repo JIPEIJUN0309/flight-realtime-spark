@@ -3,9 +3,7 @@
 ================================================
 Kafka → Structured Streaming（带 watermark）→ 5分钟窗口聚合 → Delta gold 表
 
-这个作业是整个项目"实时流处理能力"的最强证据，主讲它。
-
-★★★ 核心考点：watermark（水位线）★★★
+★ 核心概念：watermark（水位线）
 --------------------------------------------------
 【要解决的真实问题】
 真实的流数据不会按时间顺序乖乖到达。一条 20:05 发生的航班数据，
@@ -161,21 +159,15 @@ def main():
             window(col("event_time"), WINDOW_SIZE)      # 5 分钟滚动窗口
         )
         .agg(
-            # ★★★ 注意：流处理里不能用 countDistinct！★★★
-            # Spark 会直接报错：
+            # ★ 注意：流处理里不能用 countDistinct。
+            # Spark 会在分析阶段直接报错：
             #   "Distinct aggregations are not supported on streaming DataFrames"
             #
-            # 【为什么？】
-            # 精确去重要求记住"见过的每一个不同值"，在无界流上这个状态会
-            # 无限增长直到 OOM。所以 Spark 直接禁止了这个操作。
+            # 所以用 approx_count_distinct（HyperLogLog）：固定大小的草图，
+            # 默认相对误差约 5%。窗口状态的清理靠上面的 watermark，和用不用 HLL 无关。
             #
-            # 【解决方案】approx_count_distinct（基于 HyperLogLog 算法）
-            # 用固定大小的概率数据结构做基数估算，
-            # 默认误差约 5%，状态大小恒定，可以安全地长期运行。
-            #
-            # 【这是个真实的流批差异】批处理版(dws_gold_batch.py)用的是精确
-            # COUNT(DISTINCT)，流版必须用近似值 —— 这正是"流处理要为无界数据
-            # 做取舍"的经典体现，可以主动讲这个点。
+            # 批处理版（dws_gold_batch.py）保留精确 COUNT(DISTINCT)，两边可以对照，
+            # 看近似值的实际误差。
             approx_count_distinct("icao24").alias("total_flights"),
             approx_count_distinct("origin_country").alias("country_cnt"),
             count("*").alias("record_cnt"),
@@ -202,14 +194,15 @@ def main():
     )
 
     # ================================================================
-    #  5) 输出模式的选择 —— 也是考点
+    #  5) 输出模式的选择
     # ================================================================
     #
     #  三种 outputMode：
     #    - append   : 只输出"已确定不再变化"的结果。
     #                 有 watermark 的窗口聚合才能用 append —— 因为 watermark
     #                 让 Spark 知道哪些窗口已经关闭、结果不会再变了。
-    #                 ★ 我们选它：只有 append 能写进 Delta（Delta 流式写入要求）
+    #                 ★ 我们选它：窗口结果确定后只输出一次，直接追加进 Delta
+    #                   （Delta 流式写入支持 append 和 complete，不支持 update）
     #    - update   : 每个微批输出"有变化"的行（同一窗口会多次输出）
     #    - complete : 每次输出全量结果（状态无限增长，不适合长跑）
     #

@@ -4,7 +4,7 @@
 读第 2 步导出的 Parquet(/data/bench/flights_small、flights_big) →
 跑【和 Hive 完全同一段】聚合 SQL → 计时。
 
-★ 公平性说明（要能讲清）
+★ 公平性说明
   - 两个引擎读的是同一批 Parquet 物理文件。
   - SQL 文本逐字相同（见下面 QUERY_TEMPLATE，Hive 侧 bench_hive.sql 内联同一段）。
   - 时间分桶用 FLOOR(event_ts/300)*300，两引擎语义一致。
@@ -98,7 +98,7 @@ def main():
               f"三轮={[round(x,3) for x in times]}\n")
 
     print("=" * 60)
-    print("  Spark 侧结果汇总（把这几行贴给我）：")
+    print("  Spark 侧结果汇总：")
     for name, (rows, best, times) in results.items():
         print(f"  {name:14s} | {rows:>10,} 行 | best {best:6.3f}s | runs {[round(x,3) for x in times]}")
     print("=" * 60)

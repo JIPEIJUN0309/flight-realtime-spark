@@ -91,7 +91,7 @@ def main():
 
     # ================================================================
     # 表2：各国 5 分钟窗口航班占比
-    # 用窗口函数算占比 —— 高频考点
+    # 用窗口函数算占比和排名
     # ================================================================
     country_sql = """
     WITH country_base AS (
@@ -142,7 +142,7 @@ def main():
         ROUND(MAX(speed_kmh), 1)                AS max_speed_kmh,
         ROUND(MAX(altitude_m), 0)               AS max_altitude_m,
 
-        -- 一次扫描算多个条件计数（★ 这个写法和你淘宝项目"一次扫描算四类行为"同源）
+        -- 条件聚合：一次扫描算出多个条件计数
         COUNT(DISTINCT CASE WHEN flight_phase='CLIMBING'   THEN icao24 END) AS climbing_cnt,
         COUNT(DISTINCT CASE WHEN flight_phase='DESCENDING' THEN icao24 END) AS descending_cnt,
         COUNT(DISTINCT CASE WHEN flight_phase='CRUISING'   THEN icao24 END) AS cruising_cnt,

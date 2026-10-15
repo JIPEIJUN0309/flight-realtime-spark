@@ -4,7 +4,7 @@
 读 silver(Delta) → 选对比要用的列 → 导出成 Parquet(两引擎中立格式)。
 
 产出两份，都写到 /data/bench，Hive 和 Spark 读的是【同一批物理文件】：
-  - 小(真实)：/data/bench/flights_small   ≈ 13.6 万行（你采集的真实样本）
+  - 小(真实)：/data/bench/flights_small   ≈ 13.6 万行（OpenSky 实采样本）
   - 大(放大)：/data/bench/flights_big     ≈ MULT × 13.6 万行（默认 ×30 ≈ 410 万）
 
 ★ 为什么用 Parquet，不用 Delta？
@@ -70,7 +70,7 @@ def main():
             F.col("near_airport"),
             F.col("flight_phase"),
         )
-        # silver 可能有重复（ODS 流重跑过），先去重，保证基数干净
+        # 防御性去重：silver 已按 (icao24, event_time) 去重，这里再保证一次基数干净
         .dropDuplicates(["icao24", "event_ts"])
     )
     n = base.count()
