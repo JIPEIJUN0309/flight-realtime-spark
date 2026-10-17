@@ -3,7 +3,7 @@ OpenSky → Kafka 生产者（阶段一核心）
 
 做的事：
   1. 定时（默认每 30 秒）调用 OpenSky 的 /states/all 接口
-  2. 用 bounding box 限定区域（默认欧洲，飞机最多、覆盖最好），每次只花 1 credit
+  2. 用 bounding box 限定区域（默认北纬 43–52°、东经 2.5–12.5°），90 平方度每次请求花 2 credits
   3. 把返回的二维数组解析成一条条结构化的航班记录（dict）
   4. 逐条写入 Kafka 的 flights topic
 
@@ -35,14 +35,14 @@ KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "flights")
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # 采集间隔（秒）
 
-# Bounding box：默认框住欧洲（航班密度最高，OpenSky 在欧洲覆盖最好）
-# 面积 ≤ 25 平方度时每次请求只花 1 credit
+# Bounding box：默认北纬 43–52°、东经 2.5–12.5°（瑞士、德国中南部、法国东部、意大利北部）
+# 面积 90 平方度，每次请求花 2 credits（≤25 平方度花 1，25–100 平方度花 2）
 # 想换区域改这四个值即可（lamin/lomin/lamax/lomax = 纬度下/经度下/纬度上/经度上）
 BBOX = {
-    "lamin": float(os.getenv("BBOX_LAMIN", "45.0")),
-    "lomin": float(os.getenv("BBOX_LOMIN", "5.0")),
-    "lamax": float(os.getenv("BBOX_LAMAX", "50.0")),
-    "lomax": float(os.getenv("BBOX_LOMAX", "10.0")),
+    "lamin": float(os.getenv("BBOX_LAMIN", "43.0")),
+    "lomin": float(os.getenv("BBOX_LOMIN", "2.5")),
+    "lamax": float(os.getenv("BBOX_LAMAX", "52.0")),
+    "lomax": float(os.getenv("BBOX_LOMAX", "12.5")),
 }
 
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
