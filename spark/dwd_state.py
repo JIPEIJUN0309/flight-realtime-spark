@@ -7,7 +7,8 @@ DWD 状态明细 dwd_flight_state：流式写入、按区间回刷、流批对�
 
   stream    读 bronze 的 Delta 流，每 5 秒一个微批：清洗 → 按主键 MERGE，只插入表里没有的行
   backfill  按时间区间从 bronze 重算，用 replaceWhere 只覆盖这个区间，其他时段不动
-  verify    同一区间：表里的现有结果 vs 从 bronze 现算的结果，两个方向 EXCEPT ALL，差异必须是 0
+  verify    同一区间：表里的现有结果 vs 从 bronze 现算的结果，两个方向 EXCEPT ALL，差异必须是 0；
+            区间里没有数据不算通过
 
 跑法（在 spark 容器里；时间按 UTC 解释，区间左闭右开）：
   spark-submit jobs/dwd_state.py                          # stream，常驻
@@ -263,11 +264,13 @@ def run_verify(spark: SparkSession, airports, start: str, end: str) -> int:
     if not DeltaTable.isDeltaTable(spark, DWD_STATE_PATH):
         sys.exit(f"[dwd-verify] 找不到 {DWD_STATE_PATH}，先跑 stream 或 backfill。")
 
-    expected = clean_states(read_bronze(spark).where(bronze_range(start, end)), airports).persist()
+    bronze = read_bronze(spark)
+    raw = bronze.where(bronze_range(start, end))
+    expected = clean_states(raw, airports).persist()
     table = spark.read.format("delta").load(DWD_STATE_PATH)
     actual = table.where(table_range(start, end)).select(*expected.columns).persist()
 
-    n_expected, n_actual = expected.count(), actual.count()
+    n_raw, n_expected, n_actual = raw.count(), expected.count(), actual.count()
     only_in_table = actual.exceptAll(expected)
     only_in_rebuild = expected.exceptAll(actual)
     n_only_table, n_only_rebuild = only_in_table.count(), only_in_rebuild.count()
@@ -276,12 +279,21 @@ def run_verify(spark: SparkSession, airports, start: str, end: str) -> int:
 
     print("=" * 64)
     print(f"  流批对账  [{start}, {end}) UTC")
+    print(f"  bronze 原始行数       : {n_raw}")
     print(f"  表内行数（流式写入）  : {n_actual}")
     print(f"  现算行数（批量重算）  : {n_expected}")
     print(f"  只在表里的行          : {n_only_table}")
     print(f"  只在现算结果里的行    : {n_only_rebuild}")
     print(f"  表内主键重复          : {dup_keys}")
     print("=" * 64)
+
+    # 两边都是 0 行时 EXCEPT ALL 也是 0，看起来"完全一致"，其实什么都没比
+    if n_expected == 0 and n_actual == 0:
+        bronze_latest = bronze.agg(F.date_format(F.max("event_time"), TS_FMT)).first()[0]
+        print("[dwd-verify] 不能算通过：区间内没有可比的数据。"
+              f"bronze 最新快照 {bronze_latest}，表内最新快照 {latest}（UTC），"
+              "换一个两边都有数据的区间再比。")
+        return 1
 
     if n_only_table == 0 and n_only_rebuild == 0 and dup_keys == 0:
         print("[dwd-verify] 通过：同一区间的流式结果与批量重算结果完全一致")

@@ -15,7 +15,7 @@
 
 时间按 UTC 写，区间左闭右开。
 
-- 对账：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_state.py verify --start "2026-10-17 08:00" --end "2026-10-17 09:00"`。输出“完全一致”、退出码为 0 才算通过；区间要选流作业已经处理完的时段
+- 对账：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_state.py verify --start "2026-10-17 08:00" --end "2026-10-17 09:00"`。输出“完全一致”、退出码为 0 才算通过；区间要选流作业已经处理完、两边都有数据的时段，区间里没有数据会报“不能算通过”
 - 回刷：把 `verify` 换成 `backfill`，只覆盖这个区间。清洗规则改了以后，先重启流作业，再回刷规则生效前的区间
 - 只追平积压、不常驻：`dwd_state.py stream --available-now`
 - 重建表：`docker exec spark rm -rf /data/delta/dwd_flight_state /data/checkpoint/dwd_flight_state`，表和 checkpoint 一起删。只删表不删 checkpoint，流作业会从上次读到的位置继续，之前的数据不会自动重算（可以用 backfill 补）
@@ -78,3 +78,5 @@
 | 2026-10-17 | M1 | 首次流式写入 dwd_flight_state（`stream --available-now`，7 月全部历史） | 一批读入 177,584 条，过滤和去重 87 条（0.05%），新插入 177,497 条，耗时 12.0 秒 |
 | 2026-10-17 | M1 | 流批对账（`verify`，2026-01-01 至 2026-10-18） | 表内 177,497 行，与批量重算完全一致；只在一边的行 0，主键重复 0 |
 | 2026-10-17 | M1 | 删掉 checkpoint 后全部重放 | 新插入 0 条（177,497 条表里已有），耗时 8.9 秒 |
+| 2026-10-17 | M1 | 实时流批对账（10 秒轮询，`verify` 08:50–09:00 UTC） | bronze 原始 53,763 条，表内 53,763 行，与批量重算完全一致；只在一边的行 0，主键重复 0，这段没有被过滤或去重的记录 |
+| 2026-10-17 | M1 | 同一次实时运行的采集与微批耗时（M3 优化前的对比基线） | 采集器 10 秒一轮，没有发送失败；ODS 每批 6–7 秒，dwd_state 每次触发 7–9 秒，都超过 5 秒的触发间隔，不丢数据，实时延迟留到 M3 优化 |
