@@ -160,13 +160,17 @@ def make_batch_writer(airports):
             inserted = merge_with_retry(spark, merge_sql, batch_id)
 
             dropped = n_in - stats["n"]
+            # 同一天只显示时分秒；追历史时一批可能跨好几天，就显示完整时间
+            same_day = stats["t_min"][:10] == stats["t_max"][:10]
+            span = (f"{stats['t_min'][11:]}–{stats['t_max'][11:]}" if same_day
+                    else f"{stats['t_min']} – {stats['t_max']}")
             # 清洗后有、但没插进去的行，是表里已经有的主键：重放或采集端重复
             existed = f"（{stats['n'] - inserted} 条表里已有）" if isinstance(inserted, int) else ""
             print(
                 f"[dwd-stream] 批 {batch_id}：读入 {n_in} 条，"
                 f"过滤和去重掉 {dropped} 条（{dropped / n_in:.1%}），"
                 f"新插入 {inserted} 条{existed}，"
-                f"快照 {stats['t_min'][11:]}–{stats['t_max'][11:]} UTC，"
+                f"快照 {span} UTC，"
                 f"耗时 {time.time() - started:.1f} 秒"
             )
         finally:

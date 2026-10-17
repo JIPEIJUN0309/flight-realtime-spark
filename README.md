@@ -217,7 +217,7 @@ Inference runs in the same batch chain and reuses the serving layer's `MERGE` he
 
 ```bash
 # 1. Configure credentials
-cp .env.example .env          # then fill in client_id / client_secret
+cp .env.example .env          # then fill in client_id / client_secret and DATA_DIR (where the lake lives)
 
 # 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Metabase
 docker compose up -d

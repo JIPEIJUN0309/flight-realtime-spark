@@ -65,7 +65,9 @@ services:
         condition: service_healthy
     volumes:
       - ./spark:/opt/spark/work-dir/jobs
-      - ./data:/data
+      # 数据目录放在仓库外，路径写在 .env 的 DATA_DIR。没设置就直接报错，
+      # 而不是让 Docker 悄悄建一个空文件夹挂进去，让作业以为一条数据都没有
+      - "${DATA_DIR:?在 .env 里设置 DATA_DIR（数据目录），见 .env.example}:/data"
       - ./dim:/opt/spark/work-dir/dim
     deploy:
       resources:

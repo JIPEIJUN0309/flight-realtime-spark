@@ -193,10 +193,13 @@ def valid_states(df: DataFrame) -> DataFrame:
 def dedupe_states(df: DataFrame) -> DataFrame:
     """同一 (icao24, event_time) 只留 Kafka offset 最小的一条。
 
+    offset 也相同，说明是同一条 Kafka 消息被入湖了两次（比如删掉 ODS 的 checkpoint
+    重跑过），这时取先入湖的（ingest_time 小）。排序到这一步，选哪一行就完全确定了。
+
     要用到 Kafka 元数据列 partition、offset，所以输入必须是 ODS 记录。
     窗口函数不能直接用在流式 DataFrame 上，流式作业要在 foreachBatch 里调用。
     """
-    first_arrival = Window.partitionBy(*KEY_COLUMNS).orderBy("partition", "offset")
+    first_arrival = Window.partitionBy(*KEY_COLUMNS).orderBy("partition", "offset", "ingest_time")
     return (
         df.withColumn("_rn", F.row_number().over(first_arrival))
         .where("_rn = 1")

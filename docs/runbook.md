@@ -4,6 +4,7 @@
 
 ## 日常操作
 
+- 数据目录：`.env` 里的 `DATA_DIR`（例如 `D:/data/flight-realtime-spark`），容器里是 `/data`。没设置时 `docker compose` 会直接报错
 - 启动主栈：`docker compose start`，Metabase 在 http://localhost:3001
 - 启动采集器：`python ingestion/opensky_producer.py`
 - 启动入湖流作业：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py`
@@ -17,7 +18,7 @@
 - 对账：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_state.py verify --start "2026-10-17 08:00" --end "2026-10-17 09:00"`。输出“完全一致”、退出码为 0 才算通过；区间要选流作业已经处理完的时段
 - 回刷：把 `verify` 换成 `backfill`，只覆盖这个区间。清洗规则改了以后，先重启流作业，再回刷规则生效前的区间
 - 只追平积压、不常驻：`dwd_state.py stream --available-now`
-- 重建表：同时删掉 `data/delta/dwd_flight_state` 和 `data/checkpoint/dwd_flight_state`。只删表不删 checkpoint，流作业会从上次读到的位置继续，之前的数据不会自动重算（可以用 backfill 补）
+- 重建表：`docker exec spark rm -rf /data/delta/dwd_flight_state /data/checkpoint/dwd_flight_state`，表和 checkpoint 一起删。只删表不删 checkpoint，流作业会从上次读到的位置继续，之前的数据不会自动重算（可以用 backfill 补）
 
 ## 故障场景
 

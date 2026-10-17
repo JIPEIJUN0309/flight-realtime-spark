@@ -203,6 +203,16 @@ def test_dedupe_keeps_smallest_offset(spark, airports):
     assert rows[0]["kafka_ts"].timestamp() == T0 + 1 + 4
 
 
+def test_same_kafka_message_ingested_twice_keeps_first_ingest(spark, airports):
+    # 同一条 Kafka 消息（partition、offset 都相同）入湖两次，只是 ingest_time 不同
+    df = ods_df(spark, [rec(offset=5, callsign="AGAIN"), rec(offset=5, callsign="FIRST")])
+    df = df.withColumn("ingest_time", F.when(
+        F.col("callsign") == "AGAIN", F.col("ingest_time") + F.expr("INTERVAL 1 HOUR")
+    ).otherwise(F.col("ingest_time")))
+    rows = clean_states(df, airports).collect()
+    assert [r["callsign"] for r in rows] == ["FIRST"]
+
+
 def test_filter_runs_before_dedupe(spark, airports):
     # offset 小的那条无效：先过滤再去重，留下的是有效的那条；反过来做会两条都丢
     rows = clean_states(ods_df(spark, [

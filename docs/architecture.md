@@ -12,7 +12,7 @@
 | Kafka（KRaft） | 缓冲与回放 | `docker-compose.yml` |
 | Spark Structured Streaming | ODS 入湖；规划中：状态明细、起降事件、航段、最新状态的流式更新 | `spark/` |
 | Spark 批作业 | DWS 汇总、告警、异常检测打分 | `spark/` |
-| Delta Lake | ODS / DWD / DWS / ADS 分层存储 | `data/delta/`（不进 git） |
+| Delta Lake | ODS / DWD / DWS / ADS 分层存储 | 数据目录下的 `delta/`（`.env` 的 `DATA_DIR`，放在仓库外） |
 | Airflow | 批链路调度与补数 | `airflow/` |
 | PostgreSQL | 服务层 | `docker-compose.yml` |
 | Grafana / Metabase | 实时卡片 / 统计报表 | Grafana 待接入；Metabase 在 `docker-compose.yml` |
