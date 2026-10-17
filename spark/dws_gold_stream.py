@@ -42,6 +42,8 @@ from pyspark.sql.types import (
     BooleanType, LongType, IntegerType
 )
 
+from flight_rules import ALTITUDE_M, FLIGHT_PHASE, SPEED_KMH, valid_states
+
 KAFKA_BOOTSTRAP = "kafka:29092"
 KAFKA_TOPIC = "flights"
 GOLD_STREAM_PATH = "/data/delta/gold_overview_stream"
@@ -121,22 +123,17 @@ def main():
         .withColumn("event_time", to_timestamp(col("snapshot_time")))
     )
 
-    # ---- 3) 清洗（和 DWD 层同样的规则，流里也要做）----
+    # ---- 3) 清洗：有效性规则和派生字段都来自 flight_rules，和 DWD 是同一份 ----
+    # 以前这里只过滤了 on_ground 和经纬度，没有高度、速度的范围检查，
+    # 和批处理版统计的不是同一批飞机，流批对账的差异里混着规则差异。
+    # 去重要用窗口函数，不能直接用在流上；这里不去重：架数是去重计数，重复记录
+    # 不影响它，只会让 record_cnt（记录条数）偏多一点。
     cleaned = (
-        parsed
-        .filter(col("on_ground") == False)
-        .filter(col("latitude").isNotNull() & col("longitude").isNotNull())
-        .filter(col("event_time").isNotNull())
-        .withColumn("speed_kmh", sround(col("velocity") * 3.6, 1))
-        .withColumn("altitude_m", sround(col("baro_altitude"), 0))
-        .withColumn("flight_phase", expr("""
-            CASE
-                WHEN vertical_rate IS NULL  THEN 'UNKNOWN'
-                WHEN vertical_rate >  1.0   THEN 'CLIMBING'
-                WHEN vertical_rate < -1.0   THEN 'DESCENDING'
-                ELSE 'CRUISING'
-            END
-        """))
+        valid_states(parsed)
+        .where("NOT on_ground")                      # 这张表只统计在飞的飞机
+        .withColumn("speed_kmh", expr(SPEED_KMH))
+        .withColumn("altitude_m", expr(ALTITUDE_M))
+        .withColumn("flight_phase", expr(FLIGHT_PHASE))
     )
 
     # ================================================================

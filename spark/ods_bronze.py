@@ -8,6 +8,8 @@
 ODS 层的原则：忠实保留原始数据 + Kafka 元数据，保证可追溯、可回放、可重算。
 """
 
+import os
+
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col, from_json, to_timestamp, current_timestamp
@@ -25,6 +27,9 @@ KAFKA_TOPIC = "flights"
 # Delta 表和 checkpoint 都存到挂载出来的目录，宿主机能看到、重启不丢
 BRONZE_PATH = "/data/delta/bronze_flights"
 CHECKPOINT_PATH = "/data/checkpoint/bronze_flights"
+
+# 微批触发间隔。改它不影响 checkpoint，重启后照常续读。
+TRIGGER_INTERVAL = os.getenv("ODS_TRIGGER_INTERVAL", "5 seconds")
 
 
 def build_spark() -> SparkSession:
@@ -78,6 +83,7 @@ def main():
     print("  ODS Bronze 层启动：Kafka → Delta Lake")
     print(f"  读取 Kafka : {KAFKA_TOPIC} @ {KAFKA_BOOTSTRAP}")
     print(f"  写入 Delta : {BRONZE_PATH}")
+    print(f"  触发间隔   : {TRIGGER_INTERVAL}")
     print("=" * 56)
 
     # ---- 1) 从 Kafka 读流 ----
@@ -120,8 +126,9 @@ def main():
         .format("delta")
         .outputMode("append")
         .option("checkpointLocation", CHECKPOINT_PATH)
-        # 每 30 秒触发一次微批（和 Producer 的采集节奏对齐）
-        .trigger(processingTime="30 seconds")
+        # 每 5 秒触发一次微批（需求文档：实时路径 5 秒一批）。
+        # Kafka 没有新消息时不会跑空批、也不会产生空提交，所以不会凭空多出小文件。
+        .trigger(processingTime=TRIGGER_INTERVAL)
         .start(BRONZE_PATH)
     )
 

@@ -7,7 +7,17 @@
 - 启动主栈：`docker compose start`，Metabase 在 http://localhost:3001
 - 启动采集器：`python ingestion/opensky_producer.py`
 - 启动入湖流作业：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py`
+- 启动状态明细流作业（另开一个终端）：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_state.py`
 - 收工：Ctrl+C 停掉采集器和流作业，再 `docker compose stop`
+
+### 状态明细的对账与回刷
+
+时间按 UTC 写，区间左闭右开。
+
+- 对账：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_state.py verify --start "2026-10-17 08:00" --end "2026-10-17 09:00"`。输出“完全一致”、退出码为 0 才算通过；区间要选流作业已经处理完的时段
+- 回刷：把 `verify` 换成 `backfill`，只覆盖这个区间。清洗规则改了以后，先重启流作业，再回刷规则生效前的区间
+- 只追平积压、不常驻：`dwd_state.py stream --available-now`
+- 重建表：同时删掉 `data/delta/dwd_flight_state` 和 `data/checkpoint/dwd_flight_state`。只删表不删 checkpoint，流作业会从上次读到的位置继续，之前的数据不会自动重算（可以用 backfill 补）
 
 ## 故障场景
 
@@ -15,7 +25,7 @@
 
 - 现象：
 - 定位：
-- 恢复：用同一个 checkpoint 重启 `ods_bronze.py`
+- 恢复：用同一个 checkpoint 重启 `ods_bronze.py`；`dwd_state.py` 同样直接重启，重放的那一批如果之前已经写进表，日志会显示“新插入 0 条”
 - 验证标准：运行 `sql/checks/exactly_once_offsets.sql`，演练时间段内 (partition, offset) 无重复、无断号
 - 演练记录：待演练
 
@@ -47,7 +57,7 @@
 
 - 现象：
 - 定位：
-- 恢复：
+- 恢复：`dwd_state.py` 的 MERGE 遇到 Delta 并发冲突会自动重试 3 次；回刷失败直接重跑，它按区间覆盖，重跑结果一样
 - 验证标准：记录 Delta 并发冲突的现象，以及错开分区或暂停流之后的结果
 - 演练记录：待演练
 

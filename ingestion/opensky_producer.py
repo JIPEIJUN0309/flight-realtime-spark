@@ -9,6 +9,15 @@ OpenSky → Kafka 生产者（阶段一核心）
 
 这是采集层。它和下游的 Spark 消费完全解耦——Producer 只管把数据可靠地
 送进 Kafka，Spark 怎么消费是它自己的事。
+
+★ 采集端可靠性（M1 补的三件事）
+  1. 连 Kafka 失败会重试。Docker 或 Kafka 还没起来时，kafka-python 抛的不只是
+     NoBrokersAvailable，还可能是 ValueError、OSError，以前这两种会让程序直接崩掉。
+  2. 检查发送结果。producer.send() 是异步的，失败只会通过回调告诉你。以前没接回调，
+     Kafka 中途挂掉时程序照样打印"已发送"，数据丢了也不知道。
+  3. 固定节拍轮询。以前是"处理完再睡 POLL_INTERVAL 秒"，每轮实际间隔 = 请求耗时 + 间隔，
+     10 秒一轮会变成 11–12 秒一轮，采集完整率（实收轮次 ÷ 应收轮次）先天就到不了 99%。
+     现在按 0、10、20 秒……的节拍发请求，请求耗时不会累积。
 """
 
 import os
@@ -22,7 +31,7 @@ load_dotenv()
 
 import requests
 from kafka import KafkaProducer
-from kafka.errors import NoBrokersAvailable
+from kafka.errors import KafkaError
 
 from token_manager import TokenManager
 
@@ -34,6 +43,9 @@ KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "localhost:9092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "flights")
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "30"))  # 采集间隔（秒）
+
+# 每轮最多等多久让消息全部写进 Kafka（秒）。超时按本轮写入失败处理，下一轮照常进行
+FLUSH_TIMEOUT = 15
 
 # Bounding box：默认北纬 43–52°、东经 2.5–12.5°（瑞士、德国中南部、法国东部、意大利北部）
 # 面积 90 平方度，每次请求花 2 credits（≤25 平方度花 1，25–100 平方度花 2）
@@ -69,6 +81,7 @@ def parse_state(state: list) -> dict:
 
 def create_kafka_producer() -> KafkaProducer:
     """创建 Kafka 生产者，带重试（等 Kafka 起来）。"""
+    last_error = None
     for attempt in range(1, 31):
         try:
             producer = KafkaProducer(
@@ -78,13 +91,35 @@ def create_kafka_producer() -> KafkaProducer:
                 acks="all",          # 最强可靠性：等所有副本确认
                 retries=3,
                 linger_ms=200,       # 稍微攒一下批，提升吞吐
+                # Kafka 不可用时，send() 最多阻塞 10 秒就报错（默认 60 秒），不拖住整轮
+                max_block_ms=10_000,
             )
             print(f"[kafka] 已连接 {KAFKA_BOOTSTRAP}")
             return producer
-        except NoBrokersAvailable:
-            print(f"[kafka] 第 {attempt} 次连接失败，2 秒后重试…")
+        # NoBrokersAvailable 是 KafkaError 的子类。Docker 或 Kafka 容器根本没起来时，
+        # 建连阶段还可能抛 ValueError（例如 "Invalid file object: None"）或 OSError
+        except (KafkaError, ValueError, OSError) as e:
+            last_error = e
+            print(f"[kafka] 第 {attempt} 次连接失败（{type(e).__name__}），2 秒后重试…")
             time.sleep(2)
-    raise RuntimeError(f"无法连接 Kafka（{KAFKA_BOOTSTRAP}），请确认容器已启动。")
+    raise RuntimeError(
+        f"无法连接 Kafka（{KAFKA_BOOTSTRAP}）：{last_error!r}。"
+        "请先启动 Docker Desktop，再确认 docker compose ps 里 kafka 是 healthy。"
+    )
+
+
+class SendStats:
+    """一轮发送的结果统计。send() 是异步的，失败只能从回调里拿到。"""
+
+    def __init__(self):
+        self.sent = 0
+        self.failed = 0
+        self.last_error = None
+
+    def on_error(self, exc):
+        # 由 Kafka 客户端的后台 I/O 线程调用；主线程在 flush() 返回后才读这些计数
+        self.failed += 1
+        self.last_error = exc
 
 
 def fetch_states(tokens: TokenManager) -> dict:
@@ -117,7 +152,38 @@ def fetch_states(tokens: TokenManager) -> dict:
     if remaining is not None:
         print(f"[opensky] 本次请求成功，剩余额度 {remaining}")
 
-    return resp.json()
+    try:
+        return resp.json()
+    except ValueError as e:  # 响应不是合法 JSON，比如传输中被截断
+        print(f"[opensky] 响应解析失败：{e}")
+        return None
+
+
+def poll_once(round_no: int, tokens: TokenManager, producer: KafkaProducer) -> None:
+    """拉一次快照，逐条写进 Kafka，并确认这一轮写入的结果。"""
+    data = fetch_states(tokens)
+    if not (data and data.get("states")):
+        print(f"[round {round_no}] 本轮无数据（可能该区域此刻航班少或请求失败）")
+        return
+
+    snapshot_time = data.get("time")
+    stats = SendStats()
+    for state in data["states"]:
+        record = parse_state(state)
+        # 附上本次快照时间，供下游做事件时间用
+        record["snapshot_time"] = snapshot_time
+        # 用 icao24 当 key，保证同一架飞机进同一分区、顺序一致
+        future = producer.send(KAFKA_TOPIC, key=record["icao24"], value=record)
+        future.add_errback(stats.on_error)
+        stats.sent += 1
+    # 等这一轮的消息都有了结果（成功或失败）；超时会抛 KafkaTimeoutError
+    producer.flush(timeout=FLUSH_TIMEOUT)
+
+    if stats.failed:
+        print(f"[round {round_no}] 警告：{stats.failed}/{stats.sent} 条写入 Kafka 失败，"
+              f"最近一次错误：{stats.last_error!r}")
+    else:
+        print(f"[round {round_no}] 已发送 {stats.sent} 条航班记录 → Kafka")
 
 
 def run():
@@ -134,35 +200,34 @@ def run():
     # 优雅退出：Ctrl+C 时把缓冲刷完再退
     def shutdown(signum, frame):
         print("\n[exit] 收到停止信号，刷新缓冲并关闭…")
-        producer.flush()
-        producer.close()
+        try:
+            producer.flush(timeout=FLUSH_TIMEOUT)
+        except KafkaError as e:
+            print(f"[exit] 还有消息没写进 Kafka：{e!r}")
+        producer.close(timeout=5)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
     round_no = 0
+    next_tick = time.monotonic()
     while True:
         round_no += 1
-        data = fetch_states(tokens)
+        try:
+            poll_once(round_no, tokens, producer)
+        except KafkaError as e:
+            # Kafka 中途不可用：这一轮算丢失（下游的采集完整率会体现），下一轮照常
+            print(f"[round {round_no}] 写入 Kafka 失败（{type(e).__name__}: {e}），下一轮继续")
 
-        if data and data.get("states"):
-            snapshot_time = data.get("time")
-            states = data["states"]
-            sent = 0
-            for state in states:
-                record = parse_state(state)
-                # 附上本次快照时间，供下游做事件时间用
-                record["snapshot_time"] = snapshot_time
-                # 用 icao24 当 key，保证同一架飞机进同一分区、顺序一致
-                producer.send(KAFKA_TOPIC, key=record["icao24"], value=record)
-                sent += 1
-            producer.flush()
-            print(f"[round {round_no}] 已发送 {sent} 条航班记录 → Kafka")
+        # 固定节拍：下一轮按计划时间发出，不受这一轮耗时影响
+        next_tick += POLL_INTERVAL
+        delay = next_tick - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
         else:
-            print(f"[round {round_no}] 本轮无数据（可能该区域此刻航班少或请求失败）")
-
-        time.sleep(POLL_INTERVAL)
+            # 这一轮耗时超过了一个间隔（比如请求超时）：不补发错过的轮次，从现在重新对齐
+            next_tick = time.monotonic()
 
 
 if __name__ == "__main__":
