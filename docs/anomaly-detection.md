@@ -16,7 +16,7 @@ Run the collector and the bronze stream together for 6–12 hours, over daylight
 
 ```bash
 # terminal 1 — collector
-python opensky_producer.py
+python ingestion/opensky_producer.py
 
 # terminal 2 — bronze streaming job
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py

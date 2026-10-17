@@ -225,7 +225,7 @@ docker compose ps             # wait until kafka is healthy
 
 # 3. Start the producer
 pip install -r requirements.txt
-python opensky_producer.py
+python ingestion/opensky_producer.py
 
 # 4. Start the streaming jobs, each in its own terminal
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py
@@ -254,14 +254,20 @@ flight-realtime-spark/
 ├── docker-compose.airflow.yml    # Airflow scheduler + webserver
 ├── .env.example                  # Credential template
 ├── requirements.txt
-├── opensky_producer.py           # Polls OpenSky, publishes to Kafka
-├── token_manager.py              # OAuth2 token acquisition and refresh
+├── ingestion/                    # OpenSky poller (Kafka producer) and OAuth2 token manager
 ├── spark/                        # Streaming and batch Spark jobs
-├── dim/                          # Airport dimension table
 ├── airflow/                      # DAG definitions
+├── sql/                          # Data-quality and reconciliation SQL
+├── dim/                          # Airport dimension table
+├── tests/                        # Unit and data-quality tests
+├── scripts/                      # Operational scripts (topic setup, backfill, replay)
+├── docs/                         # Requirements, architecture, runbook, decision records
 ├── hive/                         # Hive image (PostgreSQL JDBC driver) for the engine comparison
-└── hive_vs_spark/                # Engine benchmark harness
+├── hive_vs_spark/                # Engine benchmark harness
+└── .github/workflows/            # CI
 ```
+
+Design documents live in [`docs/`](docs/): requirements and metric definitions ([`requirements.md`](docs/requirements.md), in Chinese), architecture, runbook and decision records.
 
 ---
 
