@@ -6,6 +6,8 @@
 | --- | --- |
 | `checks/exactly_once_offsets.sql` | 验证 Kafka 到 ODS 恰好一次：offset 无重复、无断号 |
 | `checks/zrh_ground_coverage.sql` | ZRH 5 km 内的地面记录，以及按起降规则每天判得出多少次起降，判断起降判定能否成立 |
+| `checks/landing_spot_check.sql` | M2 验收：抽 20 个落地事件附判断依据；统计落地后 10 分钟内又起飞的抖动和起飞时速分布；估算漏判的落地；丢失航段按原因分，并数出采集器停机造成的 |
+| `checks/coverage_history.sql` | 每天的经纬度范围，核对 `spark/flight_legs.py` 里登记的采集范围历史（判断"飞出范围"要用） |
 
 spark 容器只挂载了 `spark/`、`dim/` 和数据目录（`.env` 的 `DATA_DIR`），sql/ 不在容器里。
 

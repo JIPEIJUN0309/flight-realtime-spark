@@ -29,6 +29,10 @@ def spark():
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "2")
         .config("spark.ui.enabled", "false")
+        # 流式模拟测试会连续跑几百个查询，少保留历史执行计划，免得 driver 内存被占满
+        .config("spark.sql.ui.retainedExecutions", "5")
+        .config("spark.ui.retainedJobs", "20")
+        .config("spark.ui.retainedStages", "20")
         .getOrCreate()
     )
     session.sparkContext.setLogLevel("ERROR")
