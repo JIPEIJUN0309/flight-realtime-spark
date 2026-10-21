@@ -6,7 +6,7 @@
 跑法：
     docker exec -it spark python3 /opt/spark/work-dir/jobs/ml_eval.py
 
-★ 这一步产出的就是要写进报告的那张对照表，以及给 ml_score 用的告警阈值。
+★ 这一步产出的就是最终的模型对照表，以及给 ml_score 用的告警阈值。
 
 评估分三层，一层测召回、一层测误杀、一层做常识校验：
 

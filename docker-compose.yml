@@ -113,7 +113,7 @@ services:
     image: grafana/grafana:11.6.16
     container_name: flight-grafana
     ports:
-      - "3002:3000"      # 3000 被天气项目的 Metabase 占了，3001 曾是本项目的 Metabase
+      - "3002:3000"      # 3000 已被本机另一个项目占用，3001 曾是本项目的 Metabase
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: flight123

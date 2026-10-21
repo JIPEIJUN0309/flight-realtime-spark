@@ -7,7 +7,7 @@
 #   flight-hive-server2       —— HiveServer2，默认 Tez 引擎，beeline 连 :10000
 #
 # 设计要点：
-#   1. 独立 project name（flight-hive），和主栈 / Airflow / 天气项目互不干扰。
+#   1. 独立 project name（flight-hive），和主栈 / Airflow / 本机另一个项目互不干扰。
 #   2. 容器名一律 flight-hive-*，端口 9083 / 10000 / 10002（都没和现有服务撞）。
 #   3. 挂载主栈的数据目录（.env 的 DATA_DIR）到 /flight-data —— Hive 直接读 Spark 导出的
 #      Parquet 文件，两个引擎读的是【同一批物理文件】，对比才公平。

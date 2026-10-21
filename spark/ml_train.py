@@ -140,7 +140,7 @@ def main():
     Xtr, _ = mc.build_windows(p_tr)
     print(f"[train] 训练窗口: {len(Xtr)}")
     if len(Xtr) < 200:
-        print("\n  ⚠️  训练窗口不足 200 个，结果只能当流程验证，不要写进报告。\n")
+        print("\n  ⚠️  训练窗口不足 200 个，结果只能当流程验证，不要当成正式结论。\n")
 
     # ---- 3) 标准化（★ 统计量只用训练集算）----
     mu, sd = mc.fit_normalizer(Xtr)

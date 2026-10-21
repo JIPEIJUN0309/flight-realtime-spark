@@ -5,8 +5,8 @@
 # DWD → DWS → ADS 刷新流程自动化成定时调度。
 #
 # 设计要点：
-#   1. 独立 project name（flight-airflow），不和主栈、也不和天气项目抢。
-#   2. 容器名一律 flight-airflow-*，端口用 8081（天气项目 Airflow 占 8080）。
+#   1. 独立 project name（flight-airflow），不和主栈、也不和本机另一个项目抢。
+#   2. 容器名一律 flight-airflow-*，端口用 8081（本机另一个项目的 Airflow 占 8080）。
 #   3. Airflow 自己带一个元数据库 airflow-postgres（只在内网，不映射端口，
 #      不碰主栈那个业务库 postgres:5432）。
 #   4. 只挂 /var/run/docker.sock —— Airflow 靠它 docker exec 已经在跑的
@@ -90,7 +90,7 @@ services:
     container_name: flight-airflow-webserver
     command: webserver
     ports:
-      - "8081:8080"    # 宿主 8081（天气项目 Airflow 用 8080）
+      - "8081:8080"    # 宿主 8081（本机另一个项目的 Airflow 用 8080）
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
       interval: 30s
