@@ -22,12 +22,13 @@ pytestmark = pytest.mark.skipif(
 
 TABLES = """
 DROP TABLE IF EXISTS alert_event, dq_result, dwd_flight_leg, ads_latest_position,
-                     rt_sync_state, rt_batch_log CASCADE;
+                     rt_sync_state, rt_batch_log, rt_heartbeat CASCADE;
 CREATE TABLE rt_batch_log (
     query_id text, batch_id bigint, trigger_at timestamptz, num_input_rows bigint,
     trigger_ms int, add_batch_ms int, compute_ms int, pg_ms int, delta_ms int, sync_seq bigint,
     PRIMARY KEY (query_id, batch_id)
 );
+CREATE TABLE rt_heartbeat (id int PRIMARY KEY, at timestamptz);
 CREATE TABLE rt_sync_state (
     id int PRIMARY KEY, seq bigint, kind text, batch_id bigint, data_clock timestamptz,
     synced_at timestamptz, latest_changed int, legs_changed int, events_changed int
@@ -87,6 +88,26 @@ def open_alerts(eng):
     with eng.conn.cursor() as cur:
         cur.execute("SELECT count(*) FROM alert_event WHERE cleared_at IS NULL")
         return cur.fetchone()[0]
+
+
+def test_long_catchup_batch_is_not_a_stall(engine):
+    """追积压时一个批可能跑几十秒：按"跑完的时间"算，不能按开始时间算。"""
+    healthy(engine, pipeline_age=2)
+    with engine.conn.cursor() as cur:
+        cur.execute("DELETE FROM rt_batch_log")
+        # 40 秒前开始、跑了 35 秒，5 秒前刚跑完 —— 作业是活的
+        cur.execute(
+            "INSERT INTO rt_batch_log VALUES ('q', 1, now() - interval '40 seconds', "
+            "80000, 35000, 30000, 3000, 200, 800, 1)")
+    assert "pipeline_stalled" not in keys_of(engine.evaluate())
+
+    # 120 秒前开始、跑了 5 秒：115 秒没有进度，这才是停了
+    with engine.conn.cursor() as cur:
+        cur.execute("DELETE FROM rt_batch_log")
+        cur.execute(
+            "INSERT INTO rt_batch_log VALUES ('q', 1, now() - interval '120 seconds', "
+            "80000, 5000, 4000, 800, 100, 300, 1)")
+    assert "pipeline_stalled" in keys_of(engine.evaluate())
 
 
 def test_healthy_system_has_no_alerts(engine):

@@ -167,6 +167,23 @@ One subtlety worth recording: comparing a *full-history rebuild* against a *sing
 
 ---
 
+### 6. Quality Gate and Alerting — Measured
+
+The batch chain is gated: `dq_checks` runs between DWS and ADS, writes nine rule results to `dq_result` (Delta for history, PostgreSQL for the dashboards) and exits non-zero on a strong-rule failure, so Airflow never reaches `ads_export`. For a two-hour window the gate passed with completeness 715/720 = 99.3%, no duplicate keys, no out-of-bbox coordinates, a 0.15% filter rate, and every landed leg matched by a landing event.
+
+The alert engine polls the serving layer every 15 seconds. Measured drill:
+
+| Step | Observed |
+|------|----------|
+| Collector stopped | `15:33:09` local |
+| P1 "collection stalled" written | `15:33:42` — **33 s** after the stop |
+| Collector restarted | `15:33:47` |
+| Alert auto-closed (`cleared_at`) | `15:33:57` — **10 s** after recovery |
+
+Two false positives showed up during the drill and both are fixed. "Pipeline stopped" was derived from the batch-log timestamp, so a collector outage (which produces no batches) looked like a dead job; it now checks whether the pipeline process exists inside the container, and falls back to the batch timestamp elsewhere. "Batch backlog" looked at the last three batches regardless of age, so a stopped job re-raised a stale backlog; it now only considers the last two minutes.
+
+---
+
 ## Anomaly Detection
 
 The serving layer already flagged anomalies with fixed thresholds. That rule path had a specific failure mode, and it is what motivated the model.

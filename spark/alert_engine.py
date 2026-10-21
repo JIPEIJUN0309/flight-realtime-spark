@@ -26,6 +26,7 @@
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -51,6 +52,10 @@ CARD_STALE_HOLD_S = 60      # ……并持续这么久才报
 BACKLOG_BATCHES = 3         # 连续几个批超时才报积压
 BACKLOG_MS = 5000           # 微批触发间隔
 DQ_RECENT_MIN = 30          # 只看最近半小时的质量检查结果
+
+# 进程名模式：告警引擎和实时作业跑在同一个 spark 容器里，可以直接看进程在不在。
+# 不设置（例如在容器外跑、或跑单测）就不做进程检查，只靠 rt_batch_log 的时间判断。
+PIPELINE_PATTERN = os.getenv("ALERT_PIPELINE_PATTERN", "")
 
 DDL = """
 CREATE TABLE IF NOT EXISTS alert_event (
@@ -97,24 +102,51 @@ class AlertEngine:
 
     # ---------------- 规则 ----------------
     def pipeline_age_s(self):
+        """实时作业还活着吗：看最近一个批"跑完"到现在多久。
+
+        用开始时间加耗时，而不是开始时间：追积压时一批可能要跑十几秒，只看开始时间会把
+        正常的长批误判成作业停了。作业开了 noDataMicroBatches=false，没数据的批也会写一行，
+        所以采集器停了这里照样有新鲜的心跳（这时该报的是"采集中断"，不是"流作业停止"）。
+        """
         return self._scalar(
-            "SELECT EXTRACT(EPOCH FROM now() - max(trigger_at))::float FROM rt_batch_log")
+            "SELECT EXTRACT(EPOCH FROM now() "
+            "  - (trigger_at + trigger_ms * interval '1 millisecond'))::float "
+            "FROM rt_batch_log ORDER BY batch_id DESC LIMIT 1")
 
     def collection_age_s(self):
         return self._scalar(
             "SELECT EXTRACT(EPOCH FROM now() - data_clock)::float FROM rt_sync_state WHERE id = 1")
 
+    def pipeline_alive(self):
+        """实时作业的进程还在不在。只在容器里、配了进程名模式时可用；否则返回 None。"""
+        if not PIPELINE_PATTERN:
+            return None
+        try:
+            result = subprocess.run(["pgrep", "-f", PIPELINE_PATTERN],
+                                    capture_output=True, timeout=5)
+            return result.returncode == 0
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return None
+
     def evaluate(self):
         """返回当前成立的告警列表。每条 {key, level, title, detail}。"""
         conditions = []
         pipeline_age = self.pipeline_age_s()
-        pipeline_ok = pipeline_age is not None and pipeline_age <= PIPELINE_STALL_S
+        alive = self.pipeline_alive()
+        # 容器里能看进程就以进程为准：没有数据时不会产生新批次，只看批的时间会把
+        # "采集停了"误判成"作业停了"。在容器外跑（或没配进程名）时退回看批的时间。
+        if alive is not None:
+            stalled = not alive
+        else:
+            stalled = pipeline_age is not None and pipeline_age > PIPELINE_STALL_S
+        pipeline_ok = not stalled
 
-        if pipeline_age is not None and pipeline_age > PIPELINE_STALL_S:
+        if stalled:
+            detail = ("实时作业进程已经不在了" if alive is False
+                      else f"实时作业 {pipeline_age:.0f} 秒没有跑完一个批"
+                           f"（阈值 {PIPELINE_STALL_S} 秒）")
             conditions.append(dict(
-                key="pipeline_stalled", level="P1", title="流作业停止",
-                detail=f"实时作业 {pipeline_age:.0f} 秒没有新批次（阈值 {PIPELINE_STALL_S} 秒）",
-            ))
+                key="pipeline_stalled", level="P1", title="流作业停止", detail=detail))
 
         collect_age = self.collection_age_s()
         # 管道本身停了就不再报采集中断，否则一次故障会响两次
@@ -127,7 +159,8 @@ class AlertEngine:
 
         backlog = self._rows(
             "SELECT batch_id, trigger_ms FROM rt_batch_log "
-            "WHERE num_input_rows > 0 ORDER BY batch_id DESC LIMIT "
+            "WHERE num_input_rows > 0 AND trigger_at > now() - interval '2 minutes' "
+            "ORDER BY batch_id DESC LIMIT "
             f"{BACKLOG_BATCHES}")
         if len(backlog) == BACKLOG_BATCHES and all(ms > BACKLOG_MS for _, ms in backlog):
             conditions.append(dict(

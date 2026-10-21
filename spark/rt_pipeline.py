@@ -656,8 +656,9 @@ class BatchLogListener(StreamingQueryListener):
     def onQueryProgress(self, event) -> None:
         p = event.progress
         phase = self.phases.pop(p.batchId, None)
-        if phase is None and not p.numInputRows:
-            return
+        # 空批也要记一行：没有数据时（例如采集器停了）它就是"作业还活着"的心跳，
+        # 告警引擎靠 max(trigger_at) 区分"采集停了"和"流作业停了"。跳过空批的话，
+        # 采集一停就会误报成流作业停止。
         row = {
             "query_id": str(p.id), "batch_id": p.batchId, "trigger_at": p.timestamp,
             "num_input_rows": p.numInputRows,

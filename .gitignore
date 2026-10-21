@@ -35,3 +35,4 @@ Thumbs.db
 *.log
 # 机场维表是运行必需的小型参考数据，需要上传
 !dim/airports.csv
+*.err
