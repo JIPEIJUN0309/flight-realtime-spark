@@ -337,8 +337,14 @@ def main() -> None:
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(10)
-            conn = connect()
-            engine.conn = conn
+            # 重连本身也可能失败（数据库还没起来）。这里要再兜一层，
+            # 否则异常会冒出循环、把整个引擎带退出 —— PG 宕机演练时就踩到过。
+            try:
+                conn = connect()
+                engine.conn = conn
+            except Exception as e2:  # noqa: BLE001
+                print(f"[alert] 重连失败：{e2!r}，10 秒后再试")
+                time.sleep(10)
             continue
         time.sleep(INTERVAL_S)
 
