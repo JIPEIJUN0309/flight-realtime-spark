@@ -34,7 +34,7 @@ This project pulls **live aircraft state vectors** from the OpenSky Network, buf
 ```
 OpenSky API  →  Kafka  →  Spark Structured Streaming  →  Delta Lake (bronze → DWD → DWS → ADS)
                                                               ↓
-                                    PostgreSQL  →  Grafana (5 s) / Metabase (15 min)
+                                    PostgreSQL  →  Grafana (5 s live cards, 1 min statistics)
 ```
 
 Two paths share the same Kafka topic and lakehouse:
@@ -55,7 +55,7 @@ Running both makes the trade-offs between streaming and batch — exact versus a
 | **Compute** | Spark Structured Streaming · Spark SQL |
 | **Lakehouse** | Delta Lake (bronze / silver / gold) |
 | **Orchestration** | Airflow |
-| **Serving** | PostgreSQL · Metabase |
+| **Serving** | PostgreSQL · Grafana (live cards + statistics) |
 | **Environment** | Docker Compose |
 
 ---
@@ -86,7 +86,7 @@ The API enforces a **4,000 requests/day** free-tier quota. A bounding box over E
 | **DWD** | State detail | Validity rules, dedupe by `(icao24, event_time)`, typed columns, nearest airport. Ground records are kept — take-off/landing detection depends on them |
 | **DWD (derived)** | Events and legs | `on_ground` flips become take-off/landing events; airborne records are stitched into flight legs with a 20-minute timeout and a lost-reason classification |
 | **DWS** | Aggregates | 5-minute airport windows with the approach criterion (≤ 30 km, ≤ 3,000 m, descending), hourly movements from the event table, country share, area overview. Recomputable per interval |
-| **ADS / Serving** | Application | Interval-scoped Delta `MERGE` into ADS tables, then a JDBC copy into PostgreSQL, consumed by Grafana and Metabase |
+| **ADS / Serving** | Application | Interval-scoped Delta `MERGE` into ADS tables, then a JDBC copy into PostgreSQL, consumed by the Grafana dashboards |
 
 ### Nearest-Airport Enrichment
 
@@ -274,7 +274,7 @@ Inference runs in the same batch chain and reuses the serving layer's `MERGE` he
 # 1. Configure credentials
 cp .env.example .env          # then fill in client_id / client_secret and DATA_DIR (where the lake lives)
 
-# 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Metabase, Grafana
+# 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Grafana
 docker compose up -d
 docker compose ps             # wait until kafka is healthy
 
@@ -299,7 +299,7 @@ docker exec -d spark python3 /opt/spark/work-dir/jobs/alert_engine.py
 docker compose -f docker-compose.airflow.yml up -d
 ```
 
-Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` · Metabase `http://localhost:3001` · Grafana `http://localhost:3002` · Airflow `http://localhost:8081`
+Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` · Grafana `http://localhost:3002` (two dashboards: live cards at 5 s, statistics at 1 min) · Airflow `http://localhost:8081`
 
 ---
 
@@ -308,7 +308,7 @@ Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` ·
 ```
 flight-realtime-spark/
 ├── README.md
-├── docker-compose.yml            # Kafka (KRaft), Kafka UI, Spark, PostgreSQL, Metabase, Grafana
+├── docker-compose.yml            # Kafka (KRaft), Kafka UI, Spark, PostgreSQL, Grafana
 ├── docker-compose.hive.yml       # Hive on Tez, for the engine comparison
 ├── docker-compose.airflow.yml    # Airflow scheduler + webserver
 ├── .env.example                  # Credential template
@@ -401,7 +401,7 @@ Real problems encountered and fixed during development.
 - Kafka runs as a single broker with an auto-created single partition, so the replication factor is 1, `acks=all` is effectively `acks=1`, and there is no consumer parallelism.
 - Bronze is written every 5 seconds and its small files are not compacted yet (Delta `OPTIMIZE`); the file count is the main driver of table-listing cost at this scale.
 - The alert engine runs as a plain polling process. It is restart-safe (alerts are stored in PostgreSQL) but it is not clustered: running two instances would double-notify unless the dedupe table is used as the lock.
-- Metabase dashboards that referenced the pre-M4 column names (`flight_cnt`, `total_flights`) need to be repointed to `aircraft_cnt`; Grafana cards are unaffected.
+- The statistics dashboard refresh is limited by the 15-minute batch chain, so the hourly and traffic panels lag the live cards by up to one DAG interval.
 
 ---
 

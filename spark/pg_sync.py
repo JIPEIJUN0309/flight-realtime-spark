@@ -441,6 +441,23 @@ $$""")
     objects = list(tables) + VIEWS + ["rt_sync_state", "rt_sync_log", "rt_batch_log"]
     client.execute(f"GRANT USAGE ON SCHEMA public TO {READER_ROLE}")
     client.execute(f"GRANT SELECT ON {', '.join(objects)} TO {READER_ROLE}")
+    # 统计报表那几张表由批链路/告警引擎建，启动时可能还不存在：存在才授权。
+    # 每次启动都跑一遍，表被重建后权限也能自动补回来。
+    stats = ["ads_airport_traffic", "ads_airport_hourly", "ads_country_share",
+             "ads_realtime_kpi", "ads_flight_alert", "dq_result", "alert_event"]
+    arrays = ", ".join(f"'{t}'" for t in stats)
+    client.execute(f"""
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[{arrays}] LOOP
+        IF EXISTS (SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'public' AND table_name = t) THEN
+            EXECUTE format('GRANT SELECT ON %I TO {READER_ROLE}', t);
+        END IF;
+    END LOOP;
+END
+$$""")
 
 
 # ================================================================

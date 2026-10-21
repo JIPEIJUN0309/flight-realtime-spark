@@ -5,11 +5,22 @@
 ## 日常操作
 
 - 数据目录：`.env` 里的 `DATA_DIR`（例如 `D:/data/flight-realtime-spark`），容器里是 `/data`。没设置时 `docker compose` 会直接报错。其中 Delta 表和 checkpoint 在 Docker 卷里，见下面“数据目录与 Docker 卷”
-- 启动主栈：`docker compose start`。Metabase（统计报表）在 http://localhost:3001，Grafana（实时卡片，免登录只读）在 http://localhost:3002
+- 启动主栈：`docker compose start`。Grafana 在 http://localhost:3002，免登录只读：左边「机场运行 · 实时」是 5 秒刷新的实时卡片，右边「机场运行 · 统计报表」是 1 分钟刷新的批链路报表
 - 启动采集器：`python ingestion/opensky_producer.py`
 - 启动实时作业（M3 起一个作业写完 ODS、状态明细、起降事件、航段、最新状态和 PostgreSQL）：`docker exec -it spark /opt/spark/bin/spark-submit --driver-memory 2g /opt/spark/work-dir/jobs/rt_pipeline.py`
 - 不要再同时开 `ods_bronze.py`、`dwd_state.py`、`dwd_event_leg.py` 的常驻流：它们会重复写同几张表（`ods_bronze.py` 是直接追加，会让同一条消息进 bronze 两次）
 - 收工：Ctrl+C 停掉采集器和实时作业，再 `docker compose stop`。不演示时把 `.env` 的 `POLL_INTERVAL` 改回 30
+
+### 看板
+
+两块看板都在 Grafana（http://localhost:3002，免登录只读；改看板用 admin / flight123）：
+
+- **机场运行 · 实时**（5 秒刷新，值班员）：当前进近/离场/在飞架数、数据新鲜度、处理延迟、最新位置地图、近一小时起降、航段查询、链路监控
+- **机场运行 · 统计报表**（1 分钟刷新，数据值班）：过去 24 小时起降架次、机场流量排名、各国架数占比、最近异常告警、质量门禁结果、未恢复告警
+
+两块看板都是 `grafana/dashboards/*.json` 里的文件，改完由 provisioning 自动加载，不用重启。数据源是只读账号 `grafana_ro`：实时作业每次启动会调 `spark/pg_sync.py` 的 `_grant_reader`，给实时表和统计表补授权——新加统计表要把它加进那个函数的列表，否则 Grafana 会报 permission denied。
+
+> 原来还有一个 Metabase 做统计报表，M4 之后合并到 Grafana：一个工具、一套只读权限、看板随仓库走。Metabase 服务已从 `docker-compose.yml` 移除，它在 `flightdb` 里留下的 `core_user` / `report_card` 等表不再使用，可以直接删。
 
 ### 数据目录与 Docker 卷
 
@@ -73,7 +84,7 @@ M4 起批链路是 `dws_batch.py` → `ads_export.py` → `ml_features.py` → `
 - ADS：`... ads_export.py`（默认跟 DWS 的最新窗口）、`... ads_export.py --start ... --end ...`（和 DWS 用同一区间）
 - 表结构变了（M4 把 `flight_cnt` 改成 `aircraft_cnt` 就是这种情况）：DWS 和 ADS 都是派生数据，任务启动时发现列对不上会**自动整表重建**并打印一行日志，不用手工删表。但**带 `--start/--end` 的补数**遇到结构不一致会直接报错退出——按区间覆盖会把区间外的历史冲掉，正确做法是先不带区间跑一次让整表重建
 - 重建某张 DWS 表：`docker exec spark rm -rf /data/delta/dws_airport_5min`，再不带区间跑一次 `dws_batch.py`
-- 下游看板字段：ADS 和 PostgreSQL 里的列名跟着改成 `aircraft_cnt`；Metabase 里引用了旧列名的卡片要手工改（Grafana 实时卡片不读这些表，不受影响）
+- 下游看板字段：ADS 和 PostgreSQL 里的列名跟着改成 `aircraft_cnt`；Grafana 的统计报表读的是列名（原生 SQL），不依赖字段 ID，改列名后不用重新绑定。批任务写 PostgreSQL 用 `truncate` 而不是 DROP，表不会被重建，看板也不会因此失效
 
 Airflow：
 

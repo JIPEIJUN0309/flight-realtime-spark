@@ -16,7 +16,7 @@
 | Delta Lake | ODS / DWD / DWS / ADS 分层存储 | Docker 卷 `lake_delta`（容器里 `/data/delta`），checkpoint 在卷 `lake_checkpoint` |
 | Airflow | 每 15 分钟调度批链路，按数据区间计算，可用 `dags backfill` 补数 | `airflow/dags/flight_batch_pipeline.py` |
 | PostgreSQL | 服务层：实时三张表每批一个事务 upsert；统计表由 ADS 整表覆盖 | `spark/pg_sync.py`、`spark/ads_export.py` |
-| Grafana / Metabase | 实时卡片（5 秒刷新）/ 统计报表 | `grafana/`、`docker-compose.yml` |
+| Grafana | 实时卡片（5 秒刷新）和统计报表（1 分钟刷新），两块看板都读 PostgreSQL | `grafana/`、`docker-compose.yml` |
 
 ## 数据流
 

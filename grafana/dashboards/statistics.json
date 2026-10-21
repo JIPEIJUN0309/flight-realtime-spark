@@ -1,0 +1,221 @@
+{
+  "uid": "flight-stats",
+  "title": "机场运行 · 统计报表",
+  "description": "15 分钟批链路的统计结果：小时起降、流量排名、国家占比、告警和质量门禁。1 分钟刷新。",
+  "tags": [
+    "flight",
+    "batch"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "过去 24 小时起降架次（按机场）",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT hour_start AS time, airport_iata AS metric, takeoff_cnt + landing_cnt AS \"架次\" FROM ads_airport_hourly WHERE hour_start > now() - interval '24 hours' ORDER BY hour_start",
+          "format": "time_series",
+          "timeColumn": "time"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "table",
+      "title": "机场流量排名（最新 5 分钟窗口）",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT airport_iata AS \"机场\", aircraft_cnt AS \"架数\", arriving_cnt AS \"进近\", departing_cnt AS \"离场\", avg_altitude_m AS \"平均高度 m\" FROM ads_airport_traffic WHERE window_start = (SELECT max(window_start) FROM ads_airport_traffic) ORDER BY aircraft_cnt DESC LIMIT 15",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "table",
+      "title": "各国架数占比（最新 5 分钟窗口）",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 8
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT origin_country AS \"注册国\", aircraft_cnt AS \"架数\", pct_of_window AS \"占比 %\" FROM ads_country_share WHERE window_start = (SELECT max(window_start) FROM ads_country_share) ORDER BY aircraft_cnt DESC LIMIT 10",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "table",
+      "title": "异常告警（最近 20 条）",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT to_char(event_time, 'MM-DD HH24:MI') AS \"时间\", callsign AS \"呼号\", alert_type AS \"类型\", alert_detail AS \"说明\", near_airport_city AS \"最近机场\" FROM ads_flight_alert ORDER BY event_time DESC LIMIT 20",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "质量门禁（最近一次检查）",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 16
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT rule_code AS \"规则\", level AS \"级别\", CASE WHEN passed THEN '通过' ELSE '未通过' END AS \"结果\", detail AS \"说明\" FROM dq_result WHERE checked_at = (SELECT max(checked_at) FROM dq_result) ORDER BY level DESC, rule_code",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "table",
+      "title": "未恢复的告警",
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 24
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "rawSql": "SELECT level AS \"级别\", title AS \"告警\", regexp_replace(detail, '\\s+', ' ', 'g') AS \"详情\", to_char(fired_at, 'MM-DD HH24:MI') AS \"触发\" FROM alert_event WHERE cleared_at IS NULL ORDER BY level, fired_at",
+          "format": "table"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

@@ -104,31 +104,16 @@ services:
       timeout: 5s
       retries: 5
 
-  # ---------- Metabase（可视化大屏）----------
-  metabase:
-    image: metabase/metabase:latest
-    container_name: flight-metabase
-    ports:
-      - "3001:3000"
-    environment:
-      MB_DB_TYPE: postgres
-      MB_DB_DBNAME: flightdb
-      MB_DB_PORT: 5432
-      MB_DB_USER: flight
-      MB_DB_PASS: flight123
-      MB_DB_HOST: postgres
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  # ---------- Grafana（实时卡片，5 秒刷新）----------
-  # 实时卡片放 Grafana，统计报表留在 Metabase：Grafana 最短能 5 秒自动刷新，Metabase 按分钟。
-  # 数据源和看板都由 grafana/ 下的文件自动建好（provisioning），打开 http://localhost:3002 直接看
+  # ---------- Grafana（实时卡片 + 统计报表）----------
+  # 两块看板都放 Grafana：实时卡片读服务层三张表、5 秒刷新；统计报表读 ADS 表、1 分钟刷新。
+  # 数据源和看板都由 grafana/ 下的文件自动建好（provisioning），打开 http://localhost:3002 直接看。
+  # 原来另起过一个 Metabase 做统计报表，M4 之后统一到 Grafana：一个工具、一套权限（只读账号
+  # grafana_ro）、看板随仓库走，不用在界面上手工维护。
   grafana:
     image: grafana/grafana:11.6.16
     container_name: flight-grafana
     ports:
-      - "3002:3000"      # 3000 被天气项目的 Metabase 占了，3001 是本项目的 Metabase
+      - "3002:3000"      # 3000 被天气项目的 Metabase 占了，3001 曾是本项目的 Metabase
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: flight123

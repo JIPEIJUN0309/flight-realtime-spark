@@ -161,7 +161,7 @@
 | 实时链路 | 处理延迟 | P95 ≤ 10 秒 | 服务层写入时间减 kafka_ts |
 | 统计报表（小时起降、5 分钟流量、告警） | 数据新鲜度 | P95 ≤ 20 分钟 | 每次批任务结束时记录 |
 | 应急事件 | 快照时间到推送完成 | ≤ 1 分钟 | 推送日志与 event_time 对比 |
-| 看板 | 刷新间隔 | 实时卡片 5 秒（Grafana），统计报表 1 分钟（Metabase） | 看板配置 |
+| 看板 | 刷新间隔 | 实时卡片 5 秒、统计报表 1 分钟（都在 Grafana，统计报表受 15 分钟批链路限制） | 看板配置 |
 | 采集 | 采集完整率 | ≥ 99%（待校准） | 按分钟统计实收轮次 |
 | 故障修复 | 从发现到恢复 | P1 ≤ 30 分钟，P2 当天内 | 告警记录的触发和关闭时间 |
 | 重算 | 历史区间可回刷 | 任意日期可按区间回刷 | 清洗规则变更后演练一次 |
@@ -276,7 +276,7 @@
 | 流批对账容差 | 10% | 看实际差异的分布 |
 | 采集范围内其他机场 | 待盘点 | 按流量决定是否单列 |
 
-参考：[OpenSky REST API 文档](https://openskynetwork.github.io/opensky-api/rest.html)（认证方式、数据分辨率、请求额度）；[Grafana 最小刷新间隔](https://community.grafana.com/t/lowest-refresh-rate-now-5s/31361)；[Metabase 自动刷新与 URL 参数](https://www.metabase.com/docs/v0.20/users-guide/06-dashboards)
+参考：[OpenSky REST API 文档](https://openskynetwork.github.io/opensky-api/rest.html)（认证方式、数据分辨率、请求额度）；[Grafana 最小刷新间隔](https://community.grafana.com/t/lowest-refresh-rate-now-5s/31361)
 
 ## 术语表
 
