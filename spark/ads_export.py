@@ -297,6 +297,12 @@ def write_to_pg(df: DataFrame, table: str) -> None:
         .option("password", PG_PROPS["password"])
         .option("driver", PG_PROPS["driver"])
         .option("batchsize", "1000")
+        # ★ 用 truncate 而不是 drop 重建：
+        #   Spark 的 overwrite 默认是 DROP TABLE + CREATE，表被删掉重建后，Metabase 里
+        #   按字段 ID 保存的卡片全部失效（每次批任务都会把看板弄坏一次）。truncate 只清空
+        #   行、保留表和列，Metabase 的字段元数据不会失效。
+        #   代价：表结构必须和 DataFrame 一致；改列名之后要先手工 DROP 一次让 Spark 重建。
+        .option("truncate", "true")
         .mode("overwrite")
         .save()
     )
