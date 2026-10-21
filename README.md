@@ -184,6 +184,21 @@ Two false positives showed up during the drill and both are fixed. "Pipeline sto
 
 ---
 
+### 7. Failure Drills — Executed, Not Assumed
+
+Each scenario in the runbook was actually run against the live stack, not just designed:
+
+| Drill | Result |
+|-------|--------|
+| Hard-kill the streaming job (`SIGKILL`) and restart from checkpoint | 7,768 Kafka offsets replayed: **0 duplicates, 0 gaps** in the ODS layer |
+| Stop PostgreSQL for 20 s | Streaming job failed cleanly, infrastructure kept its data; after recovery the full reconciliation passed on all four comparisons (state detail, events and legs, latest position, and the three PostgreSQL tables against the lake) |
+| Stop the collector | P1 written in 33 s, auto-closed 10 s after recovery |
+| Re-run a batch interval twice | identical row counts; `verify` reports 0 differences |
+
+The exactly-once claim is therefore measured rather than asserted: the checkpoint boundary is the only place where a replay can duplicate work, and the drill reproduces exactly that.
+
+---
+
 ## Anomaly Detection
 
 The serving layer already flagged anomalies with fixed thresholds. That rule path had a specific failure mode, and it is what motivated the model.

@@ -107,35 +107,35 @@ docker exec spark pkill -f alert_engine.py                                  # �
 
 ### 1. 流作业中途被终止
 
-- 现象：
-- 定位：
-- 恢复：用同一个 checkpoint 重启 `ods_bronze.py`；`dwd_state.py` 同样直接重启，重放的那一批如果之前已经写进表，日志会显示“新插入 0 条”
-- 验证标准：运行 `sql/checks/exactly_once_offsets.sql`，演练时间段内 (partition, offset) 无重复、无断号
-- 演练记录：待演练
+- 现象：进程被强制杀掉（SIGKILL / 容器 OOM），日志停在某一批中间，之后不再有输出
+- 定位：`docker exec spark ps -eo pid,args | grep [r]t_pipeline` 看进程在不在；`docker exec spark cat /sys/fs/cgroup/memory.events` 看 `oom_kill` 是否增加；`docker inspect spark --format '{{.State.OOMKilled}}'`
+- 恢复：用同一个 checkpoint 重启（不删 checkpoint）。重放的那一批如果之前已经写进表，日志会显示“新插入 0 条”
+- 验证标准：`sql/checks/exactly_once_offsets.sql` 演练时间段内 (partition, offset) 无重复、无断号
+- 演练记录：2026-10-21 07:34:42 UTC 对实时作业发 SIGKILL，07:35:20 用同一个 checkpoint 重启。从 07:34:00 起 partition 0 的 offset 1,965,620–1,973,387 共 7,768 个，**重复 0、断号 0**
 
 ### 2. 采集中断（断网或 429 限流）
 
-- 现象：
-- 定位：
-- 恢复：
+- 现象：Grafana 卡片不再更新；处理延迟和新鲜度停住；告警引擎收到 P1「采集中断」
+- 定位：`docker exec postgres psql -U flight -d flightdb -c "SELECT now()-data_clock FROM rt_sync_state"`，超过 30 秒说明没有新快照；再看采集器日志里的 429 或请求异常
+- 恢复：重启采集器（或等额度恢复）。Kafka 里的积压会在恢复后的下一批被追上
 - 验证标准：约 30 秒时收到 P1 告警，恢复后告警自动关闭，数据自动续上
-- 演练记录：待演练
+- 演练记录：2026-10-21 07:33:09 停采集器，**07:33:42 写入 P1**（33 秒），07:33:47 重启采集器，**07:33:57 自动关闭**（10 秒）
 
 ### 3. 批任务失败后重跑
 
-- 现象：
-- 定位：
-- 恢复：
+- 现象：Airflow 任务红色、重试后仍失败；`dq_checks` 强规则失败时链会停在这一步
+- 定位：Airflow 日志里 spark-submit 的报错；质量失败看 `dq_result` 的 `detail`
+- 恢复：修好后重跑。`dws_batch.py` 按区间 `replaceWhere`、`ads_export.py` 按区间 MERGE，同一区间重跑结果不变；表结构变化时会自动整表重建
 - 验证标准：同一区间连续跑两次，行数和校验和一致
-- 演练记录：待演练
+- 演练记录：2026-10-21 `backfill` 2026-10-20 跑两遍，行数都是 565 / 1,363 / 27 / 61，随后 `verify` 0 差异
 
 ### 4. PostgreSQL 宕机
 
-- 现象：
-- 定位：
-- 恢复：
+- 现象：实时作业写服务层失败后停下（湖里数据完好）；告警引擎连不上库，每 10 秒重连一次
+- 定位：`docker compose ps postgres`；实时作业日志里是 JDBC 连接异常
+- 恢复：`docker start postgres`，等健康后重启实时作业。启动时先按湖全量对齐 PostgreSQL，再从 checkpoint 重放失败的那一批
 - 验证标准：发布失败但湖内数据不受影响，恢复后能补发
-- 演练记录：待演练
+- 演练记录：2026-10-21 07:36:12 停 postgres，实时作业随即失败退出；07:36:24 恢复，07:36:36 重启作业。之后全量对账（`rt_pipeline.py verify --start "2026-10-21 07:00" --end "2026-10-21 07:40"`）四项全部通过：起降事件与航段 567 个、最新状态 6,952 行、PostgreSQL 三张表（6,952 / 13,328 / 2,737 行）与湖逐行一致，只在一边 0、主键重复 0
 
 ### 5. 流式 MERGE 与回刷同时写一张表
 
@@ -143,15 +143,15 @@ docker exec spark pkill -f alert_engine.py                                  # �
 - 定位：
 - 恢复：`dwd_state.py` 的 MERGE 遇到 Delta 并发冲突会自动重试 3 次；回刷失败直接重跑，它按区间覆盖，重跑结果一样
 - 验证标准：记录 Delta 并发冲突的现象，以及错开分区或暂停流之后的结果
-- 演练记录：待演练
+- 演练记录：未演练。M4 之后回刷的是 DWS 表、实时作业写的是 DWD/ADS，两者不再写同一张表；真正会重叠的是 `ads_export` 的告警 MERGE 和 `rt_pipeline` 的最新状态表，它们写的是不同表。并发冲突的兜底仍是 Delta 的重试 + 按区间覆盖
 
 ### 6. 迟到数据超过水位线
 
-- 现象：
-- 定位：
-- 恢复：
+- 现象：只有可选的流式聚合作业（`dws_gold_stream.py`）用 watermark；实时主链路不用窗口聚合，没有水位线，迟到数据只要还在 Kafka 里就会被处理
+- 定位：`grep numRowsDroppedByWatermark` 作业日志
+- 恢复：批链路的 DWS 按区间重算，迟到数据会在下一次 `backfill` 里补上
 - 验证标准：查看 numRowsDroppedByWatermark，确认批链路重算后口径一致
-- 演练记录：待演练
+- 演练记录：不适用于主链路；`dws_gold_stream.py` 当前不服务看板，未演练
 
 ### 7. 误开了两个实时作业
 
@@ -203,3 +203,8 @@ docker exec spark pkill -f alert_engine.py                                  # �
 | 2026-10-21 | M5 | **告警演练：停掉采集器** | 07:33:09 停采集器，**07:33:42 写入 P1「采集中断」**（33 秒，阈值 30 秒 + 15 秒轮询），07:33:47 恢复采集，**07:33:57 自动写 `cleared_at`**（10 秒）。告警详情：“数据时钟 466 秒没有前进（阈值 30 秒），Kafka 没有新快照进来” |
 | 2026-10-21 | M5 | 调试中修掉的两个误报 | ① 「流作业停止」原来只看 `rt_batch_log` 的时间，采集一停就没有空批写入，会把采集中断误报成作业停止；改成看进程是否存活（容器内 `pgrep -f jobs/rt_pipeline.py`），在容器外跑时退回看批的时间。② 「微批积压」在作业停掉后仍拿最后 3 个旧批判断，改成只看最近 2 分钟 |
 | 2026-10-21 | M5 | 告警引擎单测（`tests/test_alert_engine.py`） | 10 个全部通过，0.7 秒：各规则触发、追积压的长批不算停止、应急代码按航段去重、条件恢复自动写 cleared_at、质量强规则失败、卡片超时要持续 1 分钟 |
+| 2026-10-21 | M6 | **exactly-once 演练**（SIGKILL 后从 checkpoint 重启） | 07:34:42 强杀，07:35:20 重启；从 07:34:00 起 partition 0 的 7,768 个 offset **重复 0、断号 0** |
+| 2026-10-21 | M6 | **PostgreSQL 宕机演练** | 07:36:12 停库，实时作业随即失败退出；07:36:24 恢复、07:36:36 重启作业；随后全量对账四项全部通过（状态明细、起降事件与航段 567 个、最新状态 6,952 行、PostgreSQL 三张表 6,952 / 13,328 / 2,737 行） |
+| 2026-10-21 | M6 | 服务层与湖的全量对账（`rt_pipeline.py verify --start "2026-10-21 07:00" --end "2026-10-21 07:40"`） | 四项通过，退出码 0：只在一边的行 0、主键重复 0 |
+| 2026-10-21 | M6 | CI 接入单测 | `.github/workflows/ci.yml` 新增 tests job：Java 17 + pyspark 3.5.3 + pytest，跑 `tests/`（要 PostgreSQL 的两组自动跳过） |
+| 2026-10-21 | M6 | runbook 故障场景 | 1–4 有演练记录（强杀、采集中断、批任务重跑、PG 宕机），5–6 写明为什么不适用；7 沿用 M3 的记录 |
