@@ -7,7 +7,7 @@ flights_big（410 万行 Parquet）+ dim/airports.csv（20 行维表）。
 三个实验：
   A) shuffle 分区数 & AQE   —— 聚合负载：200 分区(默认) vs 8 分区(手调) vs AQE 自动合并
   B) 广播 join (broadcast)  —— join 负载：Sort-Merge Join vs Broadcast Join
-  C) 分区裁剪 (partition pruning) —— 读 silver(按 dt 分区)，看执行计划里的 PartitionFilters
+  C) 分区裁剪 (partition pruning) —— 读状态明细(按 dt 分区)，看执行计划里的 PartitionFilters
 
 计时：每个配置跑 3 轮取最快(warm)。用 collect() 触发真正执行。
 
@@ -21,7 +21,7 @@ from pyspark.sql import SparkSession
 
 FLIGHTS_BIG = "/data/bench/flights_big"
 AIRPORTS_CSV = "/opt/spark/work-dir/dim/airports.csv"
-SILVER = "/data/delta/silver_flights"
+SILVER = "/data/delta/dwd_flight_state"   # M4 起状态明细取代了 silver_flights
 RUNS = 3
 
 
@@ -136,13 +136,13 @@ def main():
     b2 = run_timed("B2 广播开 → Broadcast Join", joindf)
 
     # ================================================================
-    # 实验 C：分区裁剪（读 silver，按 dt 分区）
+    # 实验 C：分区裁剪（读状态明细，按 dt 分区）
     # 加 dt 过滤时，执行计划里会出现 PartitionFilters，只扫对应分区目录。
     # ================================================================
-    print("\n[C] 分区裁剪（silver 按 dt 分区）")
+    print("\n[C] 分区裁剪（状态明细按 dt 分区）")
     sdf = spark.read.format("delta").load(SILVER)
     dts = sorted([r.dt for r in sdf.select("dt").distinct().collect()])
-    print(f"    silver 里的 dt 分区: {dts}")
+    print(f"    状态明细里的 dt 分区: {dts}")
     if dts:
         one = dts[0]
         pruned = sdf.where(sdf.dt == one)

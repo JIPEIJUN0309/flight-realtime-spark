@@ -1,7 +1,7 @@
 """
 阶段七 (1/3)：造公共对比数据集
 =====================================================
-读 silver(Delta) → 选对比要用的列 → 导出成 Parquet(两引擎中立格式)。
+读状态明细(Delta) → 选对比要用的列 → 导出成 Parquet(两引擎中立格式)。
 
 产出两份，都写到 /data/bench，Hive 和 Spark 读的是【同一批物理文件】：
   - 小(真实)：/data/bench/flights_small   ≈ 13.6 万行（OpenSky 实采样本）
@@ -27,7 +27,7 @@
 import sys
 from pyspark.sql import SparkSession, functions as F
 
-SILVER = "/data/delta/silver_flights"
+SILVER = "/data/delta/dwd_flight_state"   # M4 起状态明细取代了 silver_flights
 OUT_SMALL = "/data/bench/flights_small"
 OUT_BIG = "/data/bench/flights_big"
 
@@ -59,6 +59,8 @@ def main():
     # ---- 选出对比要用的列；event_time 转成 Unix 秒(BIGINT) ----
     base = (
         spark.read.format("delta").load(SILVER)
+        # 和原来的 silver 对齐：只取空中记录，地面记录不进对比集
+        .where("NOT on_ground")
         .select(
             F.col("icao24"),
             F.col("origin_country"),

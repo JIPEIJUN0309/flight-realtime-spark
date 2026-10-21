@@ -148,17 +148,22 @@ The default 200 shuffle partitions badly over-partition a dataset this size — 
 An Airflow DAG replaces a sequence of manually-issued Spark commands, running every 15 minutes:
 
 ```
-preflight → dwd_silver → dws_gold_batch → ads_export → ml_features → ml_score
+preflight → dws_batch → dq_checks → ads_export → ml_features → ml_score
 ```
+
+Each task receives the run's data interval (`--start`/`--end`) and looks back one hour, so a scheduled run, a manual run and an `airflow dags backfill` all execute the same code path on different windows.
 
 | Metric | Value |
 |--------|-------|
-| Runs verified (manual + scheduled) | 2 / 2 successful |
-| Average runtime | ~2 min 37 s |
+| DWS full rebuild (2026-07-13 → 2026-10-21) | 3,115 / 6,722 / 166 / 233 rows in 12.1 s + 1.9 s |
+| Interval verification (`verify`, one day) | 0 differences on all four tables |
+| Backfill drill (same day, twice) | identical row counts, verification still exact |
+| ADS rebuild + incremental merge | 5 tables, 1,388 alerts; the incremental run merged 75 alerts and left the other 1,313 untouched |
+| Quality gate (9 rules, 05:00–07:00) | all passed; snapshot completeness 715/720 = 99.3% |
 
-*Timings were measured on the four-task chain, before the two anomaly-detection tasks were added.*
+`max_active_runs=1` prevents overlapping runs, retries are configured per task, and every write is interval-scoped — the pipeline is safe to re-run at any point.
 
-`max_active_runs=1` prevents overlapping runs from writing over each other, and retries are configured per task — the pipeline is safe to re-run at any point.
+One subtlety worth recording: comparing a *full-history rebuild* against a *single-day recompute* can differ by 0.1 in `avg_*` columns because floating-point summation order depends on partitioning. Same-range comparisons are exact, which is what `verify` is for; the one-day drill above ran backfill and verify over the identical range.
 
 ---
 

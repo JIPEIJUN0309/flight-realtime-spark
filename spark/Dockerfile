@@ -38,7 +38,9 @@ RUN set -e; \
 #   如果公司网络访问不了 download.pytorch.org，把下面那行换成
 #   普通的 `pip install --no-cache-dir torch`，功能一样，就是镜像大很多。
 # ============================================================
-RUN pip install --no-cache-dir numpy pandas pyarrow scikit-learn && \
+# psycopg2-binary 是告警引擎用的：它只查 PostgreSQL，不需要 Spark，
+# 所以不走 JDBC（那要先起一个 SparkSession，白占 1–2 GB 内存）
+RUN pip install --no-cache-dir numpy pandas pyarrow scikit-learn psycopg2-binary && \
     pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 
 WORKDIR /opt/spark/work-dir

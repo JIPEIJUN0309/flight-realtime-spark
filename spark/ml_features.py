@@ -1,7 +1,7 @@
 """
-阶段九(2/5)：从 silver 抽取建模用的航迹序列
+阶段九(2/5)：从状态明细抽取建模用的航迹序列
 ========================================================================
-读 silver 明细 → 按飞机做去重与连续性筛选 → 写 Parquet 供建模作业使用
+读 dwd_flight_state 的空中记录 → 按飞机做去重与连续性筛选 → 写 Parquet 供建模作业使用
 
 跑法：
     docker exec -it spark /opt/spark/bin/spark-submit \
@@ -9,11 +9,11 @@
 
 ★ 这一步为什么必须有
 
-  silver 是"每条上报一行"的明细，而时序模型要的是"每架飞机一条连续序列"。
+  状态明细是"每条上报一行"的明细，而时序模型要的是"每架飞机一条连续序列"。
   中间隔着三件脏活，全都适合用 Spark SQL 做：
 
     1. 去重。ODS 流用新 checkpoint 重跑过就会重复消费 Kafka，
-       silver 里同一个 (icao24, event_time) 可能有多行。
+       dwd_flight_state 里同一个 (icao24, event_time) 可能有多行。
        序列里混进重复点，采样间隔会算成 0，派生特征直接爆。
        （ads_export.py 里的告警表也踩过同一个坑，那里是 MERGE 报错，
          这里是静默地污染特征，更难发现。）
@@ -24,13 +24,16 @@
     3. 必填字段校验。模型的 8 个特征全部依赖 altitude / speed /
        heading / vertical_rate，任一为空这个点就没法用。
 
+  M4 起直接读 dwd_flight_state（先过滤 on_ground = false），不再读过渡期的
+  silver_flights —— 那张表已经没有下游了。
+
   派生特征不在这里算 —— 原因见 ml_common.py 顶部的注释（要和
   ml_eval 注入合成异常后的重新派生共用同一份代码）。
 """
 
 from pyspark.sql import SparkSession
 
-SILVER_PATH = "/data/delta/silver_flights"
+DWD_STATE_PATH = "/data/delta/dwd_flight_state"
 POINTS_PATH = "/data/ml/points"
 
 MIN_POINTS = 30      # 与 ml_common.MIN_POINTS 保持一致
@@ -55,15 +58,16 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
 
     print("=" * 62)
-    print("  异常检测 · 特征抽取：silver → 航迹序列")
-    print(f"  读取 : {SILVER_PATH}")
+    print("  异常检测 · 特征抽取：状态明细 → 航迹序列")
+    print(f"  读取 : {DWD_STATE_PATH}（只用空中记录）")
     print(f"  写入 : {POINTS_PATH}")
     print("=" * 62)
 
-    silver = spark.read.format("delta").load(SILVER_PATH)
-    silver.createOrReplaceTempView("silver_flights")
-    raw_cnt = silver.count()
-    print(f"[ml] silver 明细记录数: {raw_cnt}")
+    states = (spark.read.format("delta").load(DWD_STATE_PATH)
+              .where("NOT on_ground"))
+    states.createOrReplaceTempView("dwd_flight_state")
+    raw_cnt = states.count()
+    print(f"[ml] 状态明细里的空中记录数: {raw_cnt}")
 
     points_sql = f"""
     WITH valid AS (
@@ -72,7 +76,7 @@ def main():
             latitude, longitude,
             altitude_m, speed_kmh,
             heading_deg, vertical_rate
-        FROM silver_flights
+        FROM dwd_flight_state
         WHERE
             -- 模型的 8 个特征全部依赖这几列，缺一个这个点就用不了
             altitude_m    IS NOT NULL

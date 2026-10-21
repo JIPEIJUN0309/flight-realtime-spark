@@ -48,12 +48,8 @@ The JAR-download layer is cached, so only the pip layer is rebuilt.
 ## Running
 
 ```bash
-# 0. Rebuild silver from the freshly collected bronze data.
-#    ml_features reads silver, not bronze — skipping this step
-#    silently trains on whatever silver held from a previous run.
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_silver.py
-
-# 1. Extract per-aircraft track sequences from silver
+# 1. Extract per-aircraft track sequences from the state detail
+#    (dwd_flight_state, airborne rows only — written continuously by rt_pipeline.py)
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_features.py
 
 # 2. Train, including the latent-dimension sweep
@@ -68,7 +64,7 @@ Steps 2 and 3 use `python3` rather than `spark-submit`: they read Parquet direct
 That is everything needed to produce the evaluation numbers. To also publish alerts to the dashboard, run the serving chain:
 
 ```bash
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_batch.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_batch.py
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ads_export.py
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_score.py
 ```
@@ -83,7 +79,7 @@ docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ml_sc
 |------|----------|----------------|
 | `spark/check_collection.py` | `spark-submit` | Collection readiness — how many aircraft have enough samples yet |
 | `spark/ml_common.py` | imported | Feature derivation, windowing, anomaly injection, model definition |
-| `spark/ml_features.py` | `spark-submit` | silver → dedup + continuity filter → track sequences (Parquet) |
+| `spark/ml_features.py` | `spark-submit` | state detail → dedup + continuity filter → track sequences (Parquet) |
 | `spark/ml_train.py` | `python3` | Windowing, latent sweep, final training |
 | `spark/ml_eval.py` | `python3` | Three-way comparison, threshold and debounce selection, attribution |
 | `spark/ml_score.py` | `spark-submit` | Inference → Delta `MERGE` → PostgreSQL |
@@ -137,7 +133,7 @@ So derivation exists once, in `ml_common.derive_features()`. Spark keeps the job
 
 ### Duplicate rows must be removed before differencing
 
-Re-running the bronze stream with a fresh checkpoint re-consumes Kafka, so silver can hold more than one row per `(icao24, event_time)`. Every feature divided by the sampling interval then divides by zero. The serving layer already hit this as a loud `MERGE` failure; in the feature path it fails quietly, which is worse. `ml_features.py` deduplicates explicitly.
+Re-running the bronze stream with a fresh checkpoint re-consumes Kafka, so the state detail can hold more than one row per `(icao24, event_time)`. Every feature divided by the sampling interval then divides by zero. The serving layer already hit this as a loud `MERGE` failure; in the feature path it fails quietly, which is worse. `ml_features.py` deduplicates explicitly.
 
 ### Gaps are not interpolated
 
