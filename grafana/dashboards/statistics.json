@@ -166,7 +166,7 @@
       "targets": [
         {
           "refId": "A",
-          "rawSql": "SELECT rule_code AS \"规则\", level AS \"级别\", CASE WHEN passed THEN '通过' ELSE '未通过' END AS \"结果\", detail AS \"说明\" FROM dq_result WHERE checked_at = (SELECT max(checked_at) FROM dq_result) ORDER BY level DESC, rule_code",
+          "rawSql": "SELECT rule_code AS \"规则\", level AS \"级别\", CASE WHEN passed THEN '通过' ELSE '未通过' END AS \"结果\", detail AS \"说明\" FROM dq_result WHERE checked_at > (SELECT max(checked_at) - interval '5 seconds' FROM dq_result) ORDER BY level DESC, rule_code",
           "format": "table"
         }
       ],

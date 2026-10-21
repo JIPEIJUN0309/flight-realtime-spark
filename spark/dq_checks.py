@@ -317,11 +317,14 @@ def run_checks(spark: SparkSession, start: str, end: str) -> DataFrame:
                  else f"{strong_failed} 条强规则未通过，这一段 ADS 不发布"))
 
     schema = RESULT_SCHEMA
+    # 一次检查的所有行共用一个时间戳：看板按 max(checked_at) 取"最近一次检查"，
+    # 每行各取一次 now() 的话（微秒级不同）只会取到最后一行 ads_gate。
+    checked_at = datetime.utcnow()
     df = spark.createDataFrame(
         [(datetime.strptime(r[0], "%Y-%m-%d %H:%M:%S"),
           datetime.strptime(r[1], "%Y-%m-%d %H:%M:%S"),
           r[2], r[3], r[4], float(r[5]), float(r[6]), r[7],
-          datetime.utcnow(), datetime.strptime(r[0][:10], "%Y-%m-%d"))
+          checked_at, datetime.strptime(r[0][:10], "%Y-%m-%d"))
          for r in rows],
         schema,
     )
