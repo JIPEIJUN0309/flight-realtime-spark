@@ -29,20 +29,20 @@
 
 ## What This Project Does
 
-This project pulls **live aircraft state vectors** from the OpenSky Network, buffers them through Kafka, and refines them through a Delta Lake medallion architecture into metrics for a dashboard refreshed every 15 minutes.
+This project pulls **live aircraft state vectors** from the OpenSky Network, buffers them through Kafka, and refines them through a Delta Lake medallion architecture into a real-time operations dashboard and a 15-minute statistics report.
 
 ```
-OpenSky API  →  Kafka  →  Spark Structured Streaming  →  Delta Lake (bronze → silver → gold)
+OpenSky API  →  Kafka  →  Spark Structured Streaming  →  Delta Lake (bronze → DWD → DWS → ADS)
                                                               ↓
-                                            PostgreSQL  →  Metabase dashboard
+                                    PostgreSQL  →  Grafana (5 s) / Metabase (15 min)
 ```
 
 Two paths share the same Kafka topic and lakehouse:
 
-- **Streaming path** — Structured Streaming consumes Kafka continuously. One query lands raw records in the bronze layer, exactly-once through its checkpoint and Delta's transactional sink. Another keeps 5-minute windowed aggregates with a 2-minute watermark and writes them to Delta (`gold_overview_stream`); these are not wired to the dashboard yet.
-- **Batch path** — every 15 minutes Airflow runs the silver → gold → ADS jobs over the Delta tables. ADS tables are updated with Delta `MERGE` and then copied to PostgreSQL for the dashboard.
+- **Streaming path** — one Structured Streaming query consumes Kafka every 5 seconds and writes, in the same micro-batch, the raw ODS layer, the cleaned state detail (including ground records), take-off/landing events, flight legs and the latest position per aircraft. The same micro-batch upserts three of those tables into PostgreSQL in a single transaction, which is what the Grafana cards (5-second refresh) read.
+- **Batch path** — every 15 minutes Airflow runs the DWS → DQ → ADS jobs over the Delta tables, each with an explicit time interval so any historical window can be recomputed independently. ADS tables are merged with interval-scoped deletes and copied to PostgreSQL for the statistics dashboards.
 
-Running both makes the trade-offs between streaming and batch — exact versus approximate distinct counts, latency versus completeness — measurable rather than theoretical.
+Running both makes the trade-offs between streaming and batch — exact versus approximate distinct counts, latency versus completeness, rule-based versus learned anomaly detection — measurable rather than theoretical.
 
 ---
 
@@ -82,26 +82,44 @@ The API enforces a **4,000 requests/day** free-tier quota. A bounding box over E
 
 | Layer | Role | Key Processing |
 |-------|------|----------------|
-| **Bronze** | Raw landing | Structured Streaming writes Kafka payloads to Delta as-is, plus Kafka offset and ingest time |
-| **Silver** | Cleaned detail | Drop on-ground records, null coordinates, implausible altitude/velocity; derive typed columns; nearest airport |
-| **Gold** | Aggregates | 5-minute tumbling windows — batch tables with exact distinct counts; a streaming table with a 2-minute watermark and HLL counts |
-| **ADS / Serving** | Application | Delta `MERGE` into ADS tables, then a JDBC overwrite into PostgreSQL, consumed by Metabase |
+| **ODS (bronze)** | Raw landing | Structured Streaming writes Kafka payloads to Delta as-is, plus Kafka offset and ingest time |
+| **DWD** | State detail | Validity rules, dedupe by `(icao24, event_time)`, typed columns, nearest airport. Ground records are kept — take-off/landing detection depends on them |
+| **DWD (derived)** | Events and legs | `on_ground` flips become take-off/landing events; airborne records are stitched into flight legs with a 20-minute timeout and a lost-reason classification |
+| **DWS** | Aggregates | 5-minute airport windows with the approach criterion (≤ 30 km, ≤ 3,000 m, descending), hourly movements from the event table, country share, area overview. Recomputable per interval |
+| **ADS / Serving** | Application | Interval-scoped Delta `MERGE` into ADS tables, then a JDBC copy into PostgreSQL, consumed by Grafana and Metabase |
 
 ### Nearest-Airport Enrichment
 
-The silver layer cross-joins each aircraft position with a 20-row airport dimension table — there is no equality key, so Spark plans it as a broadcast nested loop join. The Haversine great-circle distance is computed for every candidate airport, then `ROW_NUMBER()` partitioned by `(icao24, event_time)` keeps the closest one. This yields both the nearest airport and its distance without a spatial index, and leaves exactly one row per `(icao24, event_time)`.
+Each aircraft position is matched against a 20-row airport dimension table with no equality key — Spark plans it as a broadcast nested loop join. The Haversine great-circle distance is computed for every candidate airport and `ROW_NUMBER()` partitioned by `(icao24, event_time)` keeps the closest one. This yields both the nearest airport and its distance without a spatial index, and leaves exactly one row per `(icao24, event_time)`.
+
+The implementation goes one step further: the 20-row airport list is broadcast as an array constant and the distance is computed row-locally with higher-order functions, so the upstream data never has to be shuffled or expanded to 20× its size before deduplication.
 
 ---
 
 ## Key Results
 
-### 1. Streaming vs. Batch
+### 1. Real-Time Path — Measured, Not Assumed
+
+Two hours of continuous operation at a 10-second poll interval, with a sampler writing one observation every 10 seconds and an atomicity probe every 0.2 seconds (720 samples, 722 data-bearing micro-batches, 34,191 probes):
+
+| Metric | Measured | Target |
+|--------|----------|--------|
+| End-to-end freshness | P50 **14.0 s**, P95 **22.9 s** | P95 ≤ 30 s |
+| Processing latency (Kafka append → serving layer) | P50 **7.0 s**, P95 **9.4 s** | P95 ≤ 10 s |
+| Per-batch processing time | P50 **5.6 s**, P95 **6.2 s** | < 5 s (trigger interval) |
+| Serving-layer atomicity | 0 half-batches, 0 empty tables | 0 |
+
+The two customer-visible targets hold. The batch-time target does not hold during the day: traffic rose from 160 aircraft per snapshot at night to 636 on average and 1,328 at peak, and per-batch time scales with the number of records because flight-leg stitching re-reads a 20-minute lookback and runs window functions over it. On the same code at night (160–375 records per batch) the measurement was P50 4.6 s / P95 5.5 s.
+
+Two conclusions, both actionable. The freshness and latency targets are met with margin at any traffic level measured. The throughput margin is limited by the leg step (about 4.3 s of a 5.6 s batch); the obvious next step is to stop re-reading the lookback from Delta every batch and broadcast only the aircraft in the current batch into the window functions.
+
+### 2. Streaming vs. Batch
 
 Both paths compute 5-minute window aggregates of the same metrics, which exposes where the two models genuinely differ.
 
 Structured Streaming does not support distinct aggregations — `countDistinct` fails at analysis time — so the streaming version uses `approx_count_distinct` (HyperLogLog, about 5% relative error by default). Window state is bounded by the watermark either way. The batch version computes exact `COUNT(DISTINCT)`, so the two can be compared directly.
 
-### 2. Engine Comparison — Spark SQL vs. Hive on Tez
+### 3. Engine Comparison — Spark SQL vs. Hive on Tez
 
 Same aggregation SQL, same Parquet input, same machine:
 
@@ -112,7 +130,7 @@ Same aggregation SQL, same Parquet input, same machine:
 
 Outputs were cross-validated between the two engines and matched exactly.
 
-### 3. Spark Tuning — Measured, Not Assumed
+### 4. Spark Tuning — Measured, Not Assumed
 
 Identical 4.1M-row workload (the collected data scaled 30x), configuration changes only:
 
@@ -125,7 +143,7 @@ Identical 4.1M-row workload (the collected data scaled 30x), configuration chang
 
 The default 200 shuffle partitions badly over-partition a dataset this size — each task ends up doing almost nothing while scheduling overhead dominates. AQE reaches a similar outcome automatically, which is why it is preferable to hand-tuning in production.
 
-### 4. Orchestrated Batch Path
+### 5. Orchestrated Batch Path
 
 An Airflow DAG replaces a sequence of manually-issued Spark commands, running every 15 minutes:
 
@@ -219,7 +237,7 @@ Inference runs in the same batch chain and reuses the serving layer's `MERGE` he
 # 1. Configure credentials
 cp .env.example .env          # then fill in client_id / client_secret and DATA_DIR (where the lake lives)
 
-# 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Metabase
+# 2. Start the main stack: Kafka (KRaft mode), Kafka UI, Spark, PostgreSQL, Metabase, Grafana
 docker compose up -d
 docker compose ps             # wait until kafka is healthy
 
@@ -227,20 +245,24 @@ docker compose ps             # wait until kafka is healthy
 pip install -r requirements.txt
 python ingestion/opensky_producer.py
 
-# 4. Start the streaming jobs, each in its own terminal
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ods_bronze.py
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_stream.py   # optional
+# 4. Start the real-time job: one micro-batch every 5 s lands bronze, cleans states, derives
+#    airport events, flight legs and latest positions, and syncs PostgreSQL for the Grafana cards
+docker exec -it spark /opt/spark/bin/spark-submit --driver-memory 2g /opt/spark/work-dir/jobs/rt_pipeline.py
 
-# 5. Batch path: silver -> gold -> ADS (by hand, or let Airflow run it every 15 minutes)
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dwd_silver.py
-docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_gold_batch.py
+# 5. Batch path: DWS -> DQ -> ADS (by hand, or let Airflow run it every 15 minutes)
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dws_batch.py
+docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dq_checks.py \
+    --start "2026-10-20 00:00" --end "2026-10-20 06:00"
 docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/ads_export.py
 
-# 6. Optional: bring up the Airflow stack
+# 6. Alert engine: polls PostgreSQL every 15 s, writes P1/P2 alerts and pushes to a webhook
+docker exec -d spark python3 /opt/spark/work-dir/jobs/alert_engine.py
+
+# 7. Optional: bring up the Airflow stack
 docker compose -f docker-compose.airflow.yml up -d
 ```
 
-Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` · Metabase `http://localhost:3001` · Airflow `http://localhost:8081`
+Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` · Metabase `http://localhost:3001` · Grafana `http://localhost:3002` · Airflow `http://localhost:8081`
 
 ---
 
@@ -249,14 +271,15 @@ Web UIs: Kafka UI `http://localhost:8090` · Spark UI `http://localhost:4040` ·
 ```
 flight-realtime-spark/
 ├── README.md
-├── docker-compose.yml            # Kafka (KRaft), Kafka UI, Spark, PostgreSQL, Metabase
+├── docker-compose.yml            # Kafka (KRaft), Kafka UI, Spark, PostgreSQL, Metabase, Grafana
 ├── docker-compose.hive.yml       # Hive on Tez, for the engine comparison
 ├── docker-compose.airflow.yml    # Airflow scheduler + webserver
 ├── .env.example                  # Credential template
 ├── requirements.txt
 ├── ingestion/                    # OpenSky poller (Kafka producer) and OAuth2 token manager
-├── spark/                        # Streaming and batch Spark jobs
+├── spark/                        # Streaming job, batch jobs, rules, DQ checks, alert engine
 ├── airflow/                      # DAG definitions
+├── grafana/                      # Real-time cards (provisioned datasource + dashboard)
 ├── sql/                          # Data-quality and reconciliation SQL
 ├── dim/                          # Airport dimension table
 ├── tests/                        # Unit and data-quality tests
@@ -264,7 +287,7 @@ flight-realtime-spark/
 ├── docs/                         # Requirements, architecture, runbook, decision records
 ├── hive/                         # Hive image (PostgreSQL JDBC driver) for the engine comparison
 ├── hive_vs_spark/                # Engine benchmark harness
-└── .github/workflows/            # CI
+└── .github/workflows/            # CI: syntax check + unit tests
 ```
 
 Design documents live in [`docs/`](docs/): requirements and metric definitions ([`requirements.md`](docs/requirements.md), in Chinese), architecture, runbook and decision records.
@@ -278,11 +301,15 @@ Design documents live in [`docs/`](docs/): requirements and metric definitions (
 | **OAuth2 token refresh** | Acquires and transparently renews bearer tokens before expiry | Producer |
 | **Bounding-box quota control** | Restricts the query region to stay inside the free-tier daily quota | Producer |
 | **Kafka KRaft mode** | Runs Kafka without ZooKeeper — fewer moving parts | Ingestion |
-| **Watermarking** | Bounds late-arriving event state in windowed aggregations | Gold |
-| **HLL approximation** | `approx_count_distinct` stands in for `countDistinct`, which Structured Streaming does not support | Gold (streaming) |
-| **Nearest-airport join** | Cross join with a 20-row airport table (broadcast nested loop), Haversine distance, `ROW_NUMBER()` keeps the closest | Silver |
-| **Delta MERGE** | Idempotent upsert into the Delta ADS tables; alerts use sync semantics (`WHEN NOT MATCHED BY SOURCE DELETE`) | ADS |
+| **Watermarking** | Bounds late-arriving event state in windowed aggregations | Streaming aggregates |
+| **HLL approximation** | `approx_count_distinct` stands in for `countDistinct`, which Structured Streaming does not support | Streaming aggregates |
+| **Row-local nearest airport** | Airport list broadcast as an array constant, Haversine distance via higher-order functions — no 20× expansion, no shuffle | DWD cleaning |
+| **Interval recompute** | Every batch job takes `--start/--end`, snaps to window boundaries and `replaceWhere`s exactly that range: the same interval always produces the same rows | DWS |
+| **Scoped MERGE deletes** | `WHEN NOT MATCHED BY SOURCE` restricted to the recomputed interval, so a 15-minute run can retire stale rows without touching history | ADS |
+| **Transaction-per-batch serving layer** | Three real-time tables upserted in one PostgreSQL transaction; lake and serving layer stay consistent across replays | Streaming |
 | **`max_active_runs=1`** | Prevents concurrent DAG runs from overwriting each other | Orchestration |
+| **Quality gate** | Strong rules stop the DAG before ADS, so a bad interval never reaches the dashboards | DQ |
+| **Alert engine with dedupe** | P1/P2 rules over the serving layer, one open alert per key, 30-minute cooldown | Alerting |
 | **LSTM autoencoder** | Unsupervised sequence anomaly detection scored by reconstruction error | Anomaly |
 | **Circular difference** | Normalises heading deltas across the 0°/360° boundary | Anomaly |
 
@@ -317,18 +344,27 @@ Real problems encountered and fixed during development.
    *Lesson: angles, timestamps and any other wrapping quantity need their own difference operator.*
 
 8. **Duplicates after a checkpoint reset.**
-   Re-running the bronze stream with a fresh checkpoint re-consumes Kafka from `earliest`, so bronze ends up with more than one row per `(icao24, event_time)`. Every consumer has to be safe against that: silver keeps one row per key (the nearest-airport `ROW_NUMBER()` partitions on exactly that key), the alert table deduplicates on its `MERGE` key before merging, and `ml_features.py` deduplicates again, because in the feature path a duplicate divides by a zero sampling interval and fails quietly instead of loudly.
+   Re-running the bronze stream with a fresh checkpoint re-consumes Kafka from `earliest`, so bronze ends up with more than one row per `(icao24, event_time)`. Every consumer has to be safe against that: the state detail keeps one row per key, the alert table deduplicates on its `MERGE` key before merging, and `ml_features.py` deduplicates again, because in the feature path a duplicate divides by a zero sampling interval and fails quietly instead of loudly.
    *Lesson: exactly-once holds only within one checkpoint; every downstream step still needs its own idempotency.*
+
+9. **A 2-hour latency test that measured nothing.**
+   The first acceptance run started the sampler but the real-time job was stopped 20 minutes later. The sampler kept running, so freshness climbed to 896 seconds and the P95 was meaningless. The run was discarded and repeated with a guard: the report only counts samples where the data clock is advancing, and the run is only accepted if the sampler reaches its planned end with the pipeline alive.
+   *Lesson: a measurement harness needs a validity check of its own.*
+
+10. **The real-time job was OOM-killed mid-acceptance, and the exit code said 0.**
+    At 375 aircraft per snapshot the container's 4 GB cgroup limit killed the JVM (`memory.events` reported `oom_kill 1`). The job was launched as `bash -c "spark-submit … | tee log"`, and bash returns the status of the last pipeline stage — `tee` — so the wrapper reported success while the job was gone. The heap itself was only 1.3 GB of a 2 GB maximum; anonymous memory had grown to 4.6 GB because glibc creates one malloc arena per thread. Raising the limit to 5 GB and setting `MALLOC_ARENA_MAX=2` kept the same workload between 2.4 and 3.4 GB for the next two hours.
+    *Lesson: measure the memory the container actually holds, not the heap the JVM reports — and never read a pipeline's exit code as the job's.*
 
 ---
 
 ## Known Limitations
 
-- The streaming window aggregates (`gold_overview_stream`) are written to Delta but not served yet; the dashboard follows the 15-minute batch path.
-- The streaming path applies a subset of the batch cleaning rules (no altitude or speed range filters, no airport join). The rules should live in one shared function.
-- PostgreSQL is refreshed with a full JDBC overwrite, which is not atomic: a dashboard query during the write can see an empty table. A staging table plus a transactional swap would fix it.
-- Kafka runs as a single broker with an auto-created topic, so the replication factor is 1 and `acks=all` is effectively `acks=1`.
-- Bronze is written every 30 seconds and its small files are not compacted yet (Delta `OPTIMIZE`).
+- The streaming window aggregates (`gold_overview_stream`) are written to Delta but not served; the dashboards follow the real-time serving layer and the 15-minute batch path.
+- PostgreSQL statistics tables are refreshed with a full JDBC overwrite, which is not atomic: a dashboard query during the write can see an empty table. A staging table plus a transactional swap would fix it. The real-time tables do not have this problem — they are upserted inside a transaction.
+- Kafka runs as a single broker with an auto-created single partition, so the replication factor is 1, `acks=all` is effectively `acks=1`, and there is no consumer parallelism.
+- Bronze is written every 5 seconds and its small files are not compacted yet (Delta `OPTIMIZE`); the file count is the main driver of table-listing cost at this scale.
+- The alert engine runs as a plain polling process. It is restart-safe (alerts are stored in PostgreSQL) but it is not clustered: running two instances would double-notify unless the dedupe table is used as the lock.
+- Metabase dashboards that referenced the pre-M4 column names (`flight_cnt`, `total_flights`) need to be repointed to `aircraft_cnt`; Grafana cards are unaffected.
 
 ---
 

@@ -4,6 +4,7 @@ flight_legs 的单元测试：起降判定（含滑行抖动修正）、航段�
 跑法：pytest tests/   （需要 pyspark 和 Java；不需要 Delta）
 """
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 import pytest
@@ -11,7 +12,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType, StructField, StructType
 
 from flight_legs import (
-    EVENT_KEY, LEG_COLUMNS, LEG_GAP_S, compute_all, stream_step,
+    EVENT_KEY, LEG_COLUMNS, LEG_GAP_S, batch_bounds, compute_all, stream_step,
 )
 
 T0 = int(datetime(2026, 10, 17, 10, 0, tzinfo=timezone.utc).timestamp())
@@ -395,12 +396,23 @@ def scenario():
     return rows
 
 
-def run_stream(spark, rows, batch_seconds, replay=(), events_only_replay=()):
+def run_stream(spark, rows, batch_seconds, replay=(), events_only_replay=(), pass_bounds=False, threads=False):
     """模拟流式：按快照时间切成微批，每批调用 stream_step，再像 MERGE 一样写回内存里的表。
 
     replay：这些批处理两次（第一次完整写入后重放）。
     events_only_replay：这些批第一次只写入了起降事件、航段 MERGE 失败，然后重放。
+    pass_bounds：像实时作业那样，本批范围由调用方用 batch_bounds 先算好再传进去。
+    threads：像实时作业那样传 submit，让"上一个航段"和"翻转"在两个线程里同时算。
     """
+    pool = ThreadPoolExecutor(max_workers=2) if threads else None
+
+    def submit(fn):
+        def run():
+            # 新线程在 JVM 一侧没有当前会话，先设上（同 rt_pipeline.in_session），时间常量才按 UTC 解释
+            spark._jvm.org.apache.spark.sql.SparkSession.setActiveSession(spark._jsparkSession)
+            return fn()
+        return pool.submit(run)
+
     def frozen(df):
         # 收集到 driver 再建成本地 DataFrame：计划很浅、统计按实际大小，也不带之前各批的血缘。
         # 用 persist 的话，缓存的执行计划会一批套一批地嵌进后面的计划里，几十批后计划字符串就把内存撑爆了
@@ -423,7 +435,9 @@ def run_stream(spark, rows, batch_seconds, replay=(), events_only_replay=()):
         seen = all_states.where(before(hi))
         attempts = 2 if (i in replay or i in events_only_replay) else 1
         for attempt in range(attempts):
-            ev, leg_rows, _ = stream_step(batch, seen, legs, cache=frozen)
+            bounds = batch.agg(*batch_bounds()).first() if pass_bounds else None
+            ev, leg_rows, _ = stream_step(batch, seen, legs, cache=frozen, bounds=bounds,
+                                          submit=submit if threads else None)
             # 起降事件：按主键只插入
             events = frozen(events.unionByName(ev).dropDuplicates(list(EVENT_KEY)))
             if attempt == 0 and i in events_only_replay:
@@ -431,6 +445,8 @@ def run_stream(spark, rows, batch_seconds, replay=(), events_only_replay=()):
             # 航段：按 leg_id 整行 upsert
             legs = frozen(legs.join(leg_rows.select("leg_id"), "leg_id", "left_anti")
                           .unionByName(leg_rows))
+    if pool is not None:
+        pool.shutdown()
     return events, legs
 
 
@@ -447,6 +463,20 @@ def truth(spark):
 def test_stream_matches_batch(spark, truth):
     # 150 秒一批：落地、起飞、航段延续都会跨批，长航段跨越三十多批
     events, legs = run_stream(spark, scenario(), 150)
+    assert events_as_text(events) == truth[0]
+    assert legs_as_text(legs) == truth[1]
+
+
+def test_stream_with_bounds_from_caller_matches_batch(spark, truth):
+    # 实时作业在算"本批新行"的同一个作业里顺带算出范围，传给 stream_step，结果要和自己算的一样
+    events, legs = run_stream(spark, scenario(), 300, pass_bounds=True)
+    assert events_as_text(events) == truth[0]
+    assert legs_as_text(legs) == truth[1]
+
+
+def test_stream_with_threads_matches_batch(spark, truth):
+    # 实时作业让"上一个航段"和"翻转"两步在两个线程里同时算，结果要和依次算一样
+    events, legs = run_stream(spark, scenario(), 300, pass_bounds=True, threads=True)
     assert events_as_text(events) == truth[0]
     assert legs_as_text(legs) == truth[1]
 

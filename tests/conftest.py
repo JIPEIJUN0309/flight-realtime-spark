@@ -22,7 +22,7 @@ os.environ.setdefault("PYSPARK_PYTHON", sys.executable)
 def spark():
     from pyspark.sql import SparkSession
 
-    session = (
+    builder = (
         SparkSession.builder
         .master("local[2]")
         .appName("flight-tests")
@@ -33,8 +33,12 @@ def spark():
         .config("spark.sql.ui.retainedExecutions", "5")
         .config("spark.ui.retainedJobs", "20")
         .config("spark.ui.retainedStages", "20")
-        .getOrCreate()
     )
+    # 服务层测试要用 PostgreSQL 的 JDBC 驱动。spark 容器里它已在 /opt/spark/jars；
+    # 在别处跑时用 SPARK_TEST_CLASSPATH 指向 postgresql-*.jar
+    if os.getenv("SPARK_TEST_CLASSPATH"):
+        builder = builder.config("spark.driver.extraClassPath", os.environ["SPARK_TEST_CLASSPATH"])
+    session = builder.getOrCreate()
     session.sparkContext.setLogLevel("ERROR")
     yield session
     session.stop()

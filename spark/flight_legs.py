@@ -507,13 +507,31 @@ def latest_legs_before(legs: DataFrame, firsts: DataFrame, lookback_min: str) ->
     )
 
 
-def stream_step(batch: DataFrame, states: DataFrame, legs: DataFrame, cache=_no_cache):
+def batch_bounds() -> list:
+    """stream_step 要的本批范围（n、t_min、t_max、lookback_min，UTC 字符串），作为聚合表达式。
+
+    调用方可以把它们和别的聚合放进同一个作业里算好，再通过 bounds 参数传给 stream_step，少跑一个作业。
+    """
+    return [
+        F.count(F.lit(1)).alias("n"),
+        F.date_format(F.min("event_time"), TS_FMT).alias("t_min"),
+        F.date_format(F.max("event_time"), TS_FMT).alias("t_max"),
+        F.date_format(F.min("event_time") - F.expr(f"INTERVAL {LEG_GAP_S} SECONDS"), TS_FMT)
+         .alias("lookback_min"),
+    ]
+
+
+def stream_step(batch: DataFrame, states: DataFrame, legs: DataFrame, cache=_no_cache, bounds=None,
+                submit=None):
     """流式一个微批的计算，不读写 Delta。
 
       batch   本批新增的状态明细
       states  状态明细全表（可以已经包含本批），只读本批飞机回看窗口里的记录
       legs    航段表当前的内容
       cache   物化中间结果的函数，见上面的说明
+      bounds  本批范围（batch_bounds 的四个值，可以按名字取的行或字典）。不传就在这里算一次
+      submit  可选，submit(fn) 在另一个线程里执行 fn 并返回 Future。传了就让"上一个航段"（context）和
+              "翻转"（flipped）两步同时算，它们互不依赖；不传就依次算
 
     返回 (events, leg_rows, bounds)。events 按主键只插入；leg_rows 是要按 leg_id 整行
     upsert 的航段；bounds 是本批的时间范围（n、t_min、t_max、lookback_min，UTC 字符串）。
@@ -522,17 +540,12 @@ def stream_step(batch: DataFrame, states: DataFrame, legs: DataFrame, cache=_no_
     require_utc(batch)
     batch = batch.select(*STATE_COLUMNS)
     legs = legs.select(*LEG_COLUMNS)
-    b = batch.agg(
-        F.count(F.lit(1)).alias("n"),
-        F.date_format(F.min("event_time"), TS_FMT).alias("t_min"),
-        F.date_format(F.max("event_time"), TS_FMT).alias("t_max"),
-        F.date_format(F.min("event_time") - F.expr(f"INTERVAL {LEG_GAP_S} SECONDS"), TS_FMT)
-         .alias("lookback_min"),
-    ).first()
+    b = bounds if bounds is not None else batch.agg(*batch_bounds()).first()
     if b["n"] == 0:
         return None
     clock = b["t_max"]
-    firsts = cache(batch.groupBy("icao24").agg(F.min("event_time").alias("_first")))
+    # 每架飞机在本批的第一条记录。只是对本批几百行分组，不单独物化，用到它的两步各算一遍
+    firsts = batch.groupBy("icao24").agg(F.min("event_time").alias("_first"))
 
     # 回看：本批每架飞机在各自第一条记录之前 20 分钟内的记录。
     # 先用常量时间范围（Delta 据此跳过无关文件），再按每架飞机精确过滤
@@ -545,11 +558,15 @@ def stream_step(batch: DataFrame, states: DataFrame, legs: DataFrame, cache=_no_
         .where(f"event_time < _first AND unix_timestamp(event_time) >= unix_timestamp(_first) - {LEG_GAP_S}")
         .drop("_first")
     )
-    context = cache(latest_legs_before(legs, firsts, b["lookback_min"]))
-
     seq = (batch.withColumn("_decide", F.lit(True))
            .unionByName(lookback.withColumn("_decide", F.lit(False))))
-    flipped = cache(with_flips(seq))
+    if submit is None:
+        context = cache(latest_legs_before(legs, firsts, b["lookback_min"]))
+        flipped = cache(with_flips(seq))
+    else:
+        context_job = submit(lambda: cache(latest_legs_before(legs, firsts, b["lookback_min"])))
+        flipped = cache(with_flips(seq))
+        context = context_job.result()
     events = events_from(flipped.where("_decide"))
     assigned = cache(with_legs(mark_leg_starts(flipped), context))
     updates = cache(leg_updates(assigned, context, clock))

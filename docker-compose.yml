@@ -60,6 +60,10 @@ services:
     container_name: spark
     ports:
       - "4040:4040"
+    environment:
+      # 限制 glibc 的每线程 arena：实时作业跑两小时后 JVM 堆只用了 1.3/2 GB，
+      # 容器 anon 却涨到 4.6 GB 并被 cgroup OOM 杀掉。设成 2 之后稳定在 2.4–3.4 GB。
+      MALLOC_ARENA_MAX: "2"
     depends_on:
       kafka:
         condition: service_healthy
@@ -68,11 +72,19 @@ services:
       # 数据目录放在仓库外，路径写在 .env 的 DATA_DIR。没设置就直接报错，
       # 而不是让 Docker 悄悄建一个空文件夹挂进去，让作业以为一条数据都没有
       - "${DATA_DIR:?在 .env 里设置 DATA_DIR（数据目录），见 .env.example}:/data"
+      # Delta 表和流式 checkpoint 放 Docker 卷（WSL2 虚拟机里的 ext4），叠在上面 /data 的子目录上；
+      # bench/、ml/ 等冷数据仍在 DATA_DIR。Windows 的盘经 9p 挂进容器，小文件的元数据操作慢一两千倍，
+      # 而 Delta 每次读写都要列一遍 _delta_log：M3 诊断实测 bronze 只有 1,025 个日志文件，列一次 7.5 秒
+      - lake_delta:/data/delta
+      - lake_checkpoint:/data/checkpoint
       - ./dim:/opt/spark/work-dir/dim
     deploy:
       resources:
         limits:
-          memory: 4g
+          # M3 验收时踩到的坑：4g 在早高峰（每张快照 375 架、每批 5 秒）被 cgroup OOM 杀掉过一次
+          # （memory.events 里 oom_kill=1，驱动进程直接消失）。5g 留出余量；同时把 Metabase 停掉
+          # 让出虚拟机内存。再往上加要看 Docker Desktop 给虚拟机分配了多少内存
+          memory: 5g
 
   # ---------- PostgreSQL（ADS 应用层结果库）----------
   postgres:
@@ -109,6 +121,39 @@ services:
       postgres:
         condition: service_healthy
 
+  # ---------- Grafana（实时卡片，5 秒刷新）----------
+  # 实时卡片放 Grafana，统计报表留在 Metabase：Grafana 最短能 5 秒自动刷新，Metabase 按分钟。
+  # 数据源和看板都由 grafana/ 下的文件自动建好（provisioning），打开 http://localhost:3002 直接看
+  grafana:
+    image: grafana/grafana:11.6.16
+    container_name: flight-grafana
+    ports:
+      - "3002:3000"      # 3000 被天气项目的 Metabase 占了，3001 是本项目的 Metabase
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: flight123
+      # 值班大屏免登录只读；改看板用 admin 登录
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/realtime.json
+      GF_DASHBOARDS_MIN_REFRESH_INTERVAL: 5s
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/etc/grafana/dashboards
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   kafka_data:
   postgres_data:
+  grafana_data:
+  # 卷名带 project 前缀：flight-realtime-spark_lake_delta、flight-realtime-spark_lake_checkpoint。
+  # docker compose down -v 会把它们连同数据删掉，平时只用 stop / start
+  lake_delta:
+  lake_checkpoint:

@@ -1,0 +1,13 @@
+# 从 /etc/grafana/dashboards 读看板 JSON（仓库的 grafana/dashboards/ 挂进去）。
+# 看板以文件为准：在界面里改了想保留，就导出 JSON 覆盖仓库里的文件。
+apiVersion: 1
+
+providers:
+  - name: flight
+    folder: 航班湖仓
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/dashboards

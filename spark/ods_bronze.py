@@ -6,11 +6,15 @@
 
 这是整条 Spark 链路的第一环，对应"后厨开第一把火"。
 ODS 层的原则：忠实保留原始数据 + Kafka 元数据，保证可追溯、可回放、可重算。
+
+M3 起实时链路由 rt_pipeline.py 一个作业完成，bronze 也在它的微批里写（按 Kafka (partition, offset)
+只插入）。本作业只在"只入湖、不跑下游"时单独用，不要和 rt_pipeline.py 同时开：
+这里是直接追加，两边同时写会让同一条消息进 bronze 两次。
 """
 
 import os
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     col, from_json, to_timestamp, current_timestamp
 )
@@ -75,6 +79,33 @@ def flight_schema() -> StructType:
     ])
 
 
+def to_bronze(kafka_df: DataFrame) -> DataFrame:
+    """Kafka 消息 → ODS 记录：解析 JSON，加 Kafka 元数据和入湖时间，不动业务字段。
+
+    输入要有 Kafka 源的 value、topic、partition、offset、timestamp 列。
+    ingest_time 用 current_timestamp()：写在流式查询的计划里时，Spark 每个微批把它换成这一批的
+    触发时间并记在 checkpoint 里，同一批重放时还是同一个值。
+    """
+    parsed = (
+        kafka_df
+        # Kafka 的 value 是二进制，先转成字符串，再按 schema 解析成结构化列
+        .selectExpr("CAST(value AS STRING) AS json_str",
+                    "topic", "partition", "offset", "timestamp AS kafka_ts")
+        .select(
+            from_json(col("json_str"), flight_schema()).alias("data"),
+            col("topic"), col("partition"), col("offset"), col("kafka_ts")
+        )
+        .select("data.*", "topic", "partition", "offset", "kafka_ts")
+    )
+    return (
+        parsed
+        # 把 Unix 秒时间戳转成真正的 timestamp，方便下游用
+        .withColumn("event_time", to_timestamp(col("snapshot_time")))
+        # 记录本条数据的入湖时间（数据血缘/审计用）
+        .withColumn("ingest_time", current_timestamp())
+    )
+
+
 def main():
     spark = build_spark()
     spark.sparkContext.setLogLevel("WARN")  # 少打点日志，看得清
@@ -97,30 +128,10 @@ def main():
         .load()
     )
 
-    # ---- 2) 解析 JSON ----
-    # Kafka 的 value 是二进制，先转成字符串，再按 schema 解析成结构化列
-    schema = flight_schema()
-    parsed = (
-        raw
-        .selectExpr("CAST(value AS STRING) AS json_str",
-                    "topic", "partition", "offset", "timestamp AS kafka_ts")
-        .select(
-            from_json(col("json_str"), schema).alias("data"),
-            col("topic"), col("partition"), col("offset"), col("kafka_ts")
-        )
-        .select("data.*", "topic", "partition", "offset", "kafka_ts")
-    )
+    # ---- 2) 解析 JSON，加元数据（实时作业 rt_pipeline.py 用的是同一个函数）----
+    bronze = to_bronze(raw)
 
-    # ---- 3) ODS 层加工：只加元数据，不动业务字段 ----
-    bronze = (
-        parsed
-        # 把 Unix 秒时间戳转成真正的 timestamp，方便下游用
-        .withColumn("event_time", to_timestamp(col("snapshot_time")))
-        # 记录本条数据的入湖时间（数据血缘/审计用）
-        .withColumn("ingest_time", current_timestamp())
-    )
-
-    # ---- 4) 写进 Delta Lake（append 模式，持续追加）----
+    # ---- 3) 写进 Delta Lake（append 模式，持续追加）----
     query = (
         bronze.writeStream
         .format("delta")

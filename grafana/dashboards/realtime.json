@@ -1,0 +1,1030 @@
+{
+  "uid": "flight-rt",
+  "title": "机场运行 · 实时",
+  "description": "航班湖仓实时卡片：口径以 docs/requirements.md 为准。数据来自 PostgreSQL 实时表，由 spark/rt_pipeline.py 每 5 秒同步一次。",
+  "tags": [
+    "flight",
+    "realtime"
+  ],
+  "timezone": "Europe/Zurich",
+  "refresh": "5s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m"
+    ]
+  },
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "fiscalYearStartMonth": 0,
+  "liveNow": false,
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "type": "custom",
+        "name": "airport",
+        "label": "机场",
+        "query": "ZRH,GVA,BSL,BRN,LUG,FRA,MUC,STR,NUE,FDH,CGN,DTM,LUX,LYS,SXB,MXP,LIN,BGY,TRN,INN",
+        "current": {
+          "selected": true,
+          "text": "ZRH",
+          "value": "ZRH"
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "ZRH",
+            "value": "ZRH"
+          },
+          {
+            "selected": false,
+            "text": "GVA",
+            "value": "GVA"
+          },
+          {
+            "selected": false,
+            "text": "BSL",
+            "value": "BSL"
+          },
+          {
+            "selected": false,
+            "text": "BRN",
+            "value": "BRN"
+          },
+          {
+            "selected": false,
+            "text": "LUG",
+            "value": "LUG"
+          },
+          {
+            "selected": false,
+            "text": "FRA",
+            "value": "FRA"
+          },
+          {
+            "selected": false,
+            "text": "MUC",
+            "value": "MUC"
+          },
+          {
+            "selected": false,
+            "text": "STR",
+            "value": "STR"
+          },
+          {
+            "selected": false,
+            "text": "NUE",
+            "value": "NUE"
+          },
+          {
+            "selected": false,
+            "text": "FDH",
+            "value": "FDH"
+          },
+          {
+            "selected": false,
+            "text": "CGN",
+            "value": "CGN"
+          },
+          {
+            "selected": false,
+            "text": "DTM",
+            "value": "DTM"
+          },
+          {
+            "selected": false,
+            "text": "LUX",
+            "value": "LUX"
+          },
+          {
+            "selected": false,
+            "text": "LYS",
+            "value": "LYS"
+          },
+          {
+            "selected": false,
+            "text": "SXB",
+            "value": "SXB"
+          },
+          {
+            "selected": false,
+            "text": "MXP",
+            "value": "MXP"
+          },
+          {
+            "selected": false,
+            "text": "LIN",
+            "value": "LIN"
+          },
+          {
+            "selected": false,
+            "text": "BGY",
+            "value": "BGY"
+          },
+          {
+            "selected": false,
+            "text": "TRN",
+            "value": "TRN"
+          },
+          {
+            "selected": false,
+            "text": "INN",
+            "value": "INN"
+          }
+        ],
+        "multi": false,
+        "includeAll": false,
+        "hide": 0,
+        "skipUrlSync": false
+      },
+      {
+        "type": "textbox",
+        "name": "callsign",
+        "label": "呼号或 icao24",
+        "query": "",
+        "current": {
+          "selected": false,
+          "text": "",
+          "value": ""
+        },
+        "options": [
+          {
+            "selected": true,
+            "text": "",
+            "value": ""
+          }
+        ],
+        "hide": 0,
+        "skipUrlSync": false
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "运行：值班员",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "当前进近架数",
+      "description": "最近 30 秒有更新（相对最新快照时间）、没离开的飞机里，按最近机场归属到 $airport、距离 ≤ 30 km、气压高度 ≤ 3,000 m、垂直速率 ≤ −1 m/s 的架数。口径见需求文档「指标口径」，判定写在视图 rt_current_position 里。",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) FILTER (WHERE is_approach) AS \"进近\"\nFROM rt_current_position\nWHERE near_airport_iata = ${airport:sqlstring}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "当前离场架数",
+      "description": "最近 30 秒有更新（相对最新快照时间）、没离开的飞机里，按最近机场归属到 $airport、距离 ≤ 30 km、气压高度 ≤ 3,000 m、垂直速率 ≥ 1 m/s 的架数。",
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) FILTER (WHERE is_departure) AS \"离场\"\nFROM rt_current_position\nWHERE near_airport_iata = ${airport:sqlstring}"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "区域内当前飞机",
+      "description": "整个采集范围内最近 30 秒有更新（相对最新快照时间）、没离开的飞机，分空中和地面。",
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) FILTER (WHERE NOT on_ground) AS \"空中\",\n       count(*) FILTER (WHERE on_ground)     AS \"地面\"\nFROM rt_current_position"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "数据新鲜度",
+      "description": "当前时间减去最新状态表里最新的快照时间（秒）。目标 P95 ≤ 30 秒，超过变红。包含 OpenSky 本身的滞后、等下一轮轮询（10 秒一轮）和链路处理时间。",
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT EXTRACT(EPOCH FROM now() - max(event_time)) AS \"新鲜度\"\nFROM ads_latest_position"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 30
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "处理延迟（最近一批）",
+      "description": "最近一批写进服务层的时间减去这批记录里最早的 Kafka 写入时间（秒）。目标 P95 ≤ 10 秒。",
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT latency_max_s AS \"处理延迟\"\nFROM rt_sync_log\nWHERE kind = 'batch'\nORDER BY sync_seq DESC\nLIMIT 1"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "最近一批耗时",
+      "description": "Spark 统计的最近一个微批的整批耗时（秒），要稳定小于 5 秒的触发间隔。",
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT trigger_ms / 1000.0 AS \"批耗时\"\nFROM rt_batch_log\nORDER BY trigger_at DESC\nLIMIT 1"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 8,
+      "type": "geomap",
+      "title": "最新位置",
+      "description": "每架没离开的飞机的最新位置（最后出现超过 1 分钟算已离开，不显示），颜色表示气压高度。",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 16,
+        "h": 15
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT latitude, longitude,\n       callsign          AS \"呼号\",\n       icao24,\n       altitude_m        AS \"高度 m\",\n       speed_kmh         AS \"时速 km/h\",\n       flight_phase      AS \"飞行阶段\",\n       near_airport_iata AS \"最近机场\",\n       airport_dist_km   AS \"距离 km\"\nFROM ads_latest_position\nWHERE NOT departed"
+        }
+      ],
+      "options": {
+        "view": {
+          "id": "coords",
+          "lat": 47.46,
+          "lon": 8.55,
+          "zoom": 6.2,
+          "allLayers": true
+        },
+        "controls": {
+          "showZoom": true,
+          "mouseWheelZoom": true,
+          "showAttribution": true,
+          "showScale": false,
+          "showMeasure": false,
+          "showDebug": false
+        },
+        "basemap": {
+          "type": "xyz",
+          "name": "底图",
+          "config": {
+            "url": "https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}",
+            "attribution": "Tiles © <a href=\"https://www.esri.com/\">Esri</a> — Esri, HERE, Garmin, © OpenStreetMap contributors",
+            "maxZoom": 16
+          }
+        },
+        "layers": [
+          {
+            "type": "markers",
+            "name": "飞机",
+            "tooltip": true,
+            "location": {
+              "mode": "coords",
+              "latitude": "latitude",
+              "longitude": "longitude"
+            },
+            "config": {
+              "showLegend": true,
+              "style": {
+                "color": {
+                  "field": "高度 m",
+                  "fixed": "dark-green"
+                },
+                "opacity": 0.85,
+                "size": {
+                  "fixed": 4,
+                  "min": 2,
+                  "max": 12
+                },
+                "symbol": {
+                  "mode": "fixed",
+                  "fixed": "img/icons/marker/circle.svg"
+                },
+                "symbolAlign": {
+                  "horizontal": "center",
+                  "vertical": "center"
+                },
+                "textConfig": {
+                  "fontSize": 12,
+                  "offsetX": 0,
+                  "offsetY": 0,
+                  "textAlign": "center",
+                  "textBaseline": "middle"
+                }
+              }
+            }
+          }
+        ],
+        "tooltip": {
+          "mode": "details"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-BlYlRd"
+          },
+          "min": 0,
+          "max": 12000,
+          "custom": {
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            }
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 9,
+      "type": "table",
+      "title": "近一小时起降（$airport）",
+      "description": "数据时钟之前一小时内，在 $airport 判出的起飞和落地事件（规则见需求文档「起降判定」）。",
+      "gridPos": {
+        "x": 16,
+        "y": 5,
+        "w": 8,
+        "h": 15
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT e.event_time      AS \"时间\",\n       CASE e.event_type WHEN 'LANDING' THEN '落地' ELSE '起飞' END AS \"类型\",\n       e.callsign        AS \"呼号\",\n       e.icao24,\n       e.airport_dist_km AS \"离机场 km\",\n       e.gap_s           AS \"翻转间隔 s\"\nFROM dwd_airport_event e\nCROSS JOIN rt_sync_state s\nWHERE e.airport_iata = ${airport:sqlstring}\n  AND e.event_time >= s.data_clock - INTERVAL '1 hour'\nORDER BY e.event_time DESC\nLIMIT 50"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "航段状态（全区域）",
+      "description": "进行中的航段，以及数据时钟之前一小时内结束的航段（落地、丢失）。超过 20 分钟没有空中记录的航段记为丢失。",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 4,
+        "h": 10
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT count(*) FILTER (WHERE l.status = 'IN_AIR') AS \"进行中\",\n       count(*) FILTER (WHERE l.status = 'LANDED')  AS \"近一小时落地\",\n       count(*) FILTER (WHERE l.status = 'LOST')    AS \"近一小时丢失\"\nFROM dwd_flight_leg l\nCROSS JOIN rt_sync_state s\nWHERE l.status = 'IN_AIR' OR l.end_time >= s.data_clock - INTERVAL '1 hour'"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "noValue": "—"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "航段（输入呼号查某架飞机，不输入时看和 $airport 相关的）",
+      "description": "进行中、或数据时钟之前一小时内结束的航段。起飞机场：起飞事件判出的机场；未知 = 在范围内起飞但没判出来；区域外 = 之前 20 分钟没有记录。规则见需求文档「航段切分」。",
+      "gridPos": {
+        "x": 4,
+        "y": 20,
+        "w": 20,
+        "h": 10
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT l.callsign AS \"呼号\",\n       l.icao24,\n       CASE l.departure_kind WHEN 'TAKEOFF' THEN l.departure_iata\n                             WHEN 'UNDETECTED' THEN '未知' ELSE '区域外' END AS \"起飞\",\n       l.start_time AS \"开始\",\n       CASE l.status WHEN 'IN_AIR' THEN '进行中' WHEN 'LANDED' THEN '已落地' ELSE '丢失' END AS \"状态\",\n       l.arrival_iata AS \"落地\",\n       l.end_time AS \"结束\",\n       CASE l.lost_reason WHEN 'SUSPECTED_LANDING' THEN '疑似落地未识别'\n                          WHEN 'EXITED' THEN '飞出范围'\n                          WHEN 'SIGNAL_LOST' THEN '信号丢失' END AS \"丢失原因\",\n       l.last_seen AS \"最后出现\",\n       l.last_airport_iata AS \"最近机场\",\n       l.last_airport_dist_km AS \"距离 km\",\n       l.last_altitude_m AS \"高度 m\",\n       l.max_altitude_m AS \"最大高度 m\"\nFROM dwd_flight_leg l\nCROSS JOIN rt_sync_state s\nWHERE (l.status = 'IN_AIR' OR l.end_time >= s.data_clock - INTERVAL '1 hour')\n  AND CASE WHEN ${callsign:sqlstring} = ''\n           THEN ${airport:sqlstring} IN (l.departure_iata, l.arrival_iata, l.last_airport_iata)\n           ELSE l.callsign ILIKE '%' || ${callsign:sqlstring} || '%' OR l.icao24 = lower(${callsign:sqlstring})\n      END\nORDER BY l.last_seen DESC\nLIMIT 200"
+        }
+      ],
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "filterable": false
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "链路监控：数据值班",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 30,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 13,
+      "type": "timeseries",
+      "title": "每批耗时",
+      "description": "rt_batch_log：Spark 统计的整批耗时，以及其中写 PostgreSQL、并发提交 Delta 各用了多久。红线是 5 秒的触发间隔。",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT trigger_at       AS time,\n       trigger_ms / 1000.0 AS \"整批\",\n       pg_ms / 1000.0      AS \"写 PostgreSQL\",\n       delta_ms / 1000.0   AS \"提交 Delta\"\nFROM rt_batch_log\nWHERE $__timeFilter(trigger_at)\nORDER BY 1"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "fillOpacity": 0,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 14,
+      "type": "timeseries",
+      "title": "处理延迟",
+      "description": "rt_sync_log：每批写进服务层的时间减去这批记录的 Kafka 写入时间。红线是 10 秒的目标。",
+      "gridPos": {
+        "x": 12,
+        "y": 31,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "flightdb"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "flightdb"
+          },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT synced_at     AS time,\n       latency_max_s AS \"最大\",\n       latency_p50_s AS \"中位数\"\nFROM rt_sync_log\nWHERE kind = 'batch' AND $__timeFilter(synced_at)\nORDER BY 1"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "pointSize": 3,
+            "showPoints": "auto",
+            "spanNulls": false,
+            "fillOpacity": 0,
+            "thresholdsStyle": {
+              "mode": "line+area"
+            }
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

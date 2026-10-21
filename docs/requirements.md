@@ -56,7 +56,7 @@
 
 ## 数据模型
 
-实时路径每 5 秒触发一批、端到端 30 秒以内，批路径每 15 分钟汇总一次。在现有分层上新增起降事件和航段两张表，改造状态明细和最新状态两张表。
+实时路径每 5 秒触发一批、端到端 30 秒以内，批路径每 15 分钟汇总一次。在现有分层上新增起降事件和航段两张表，改造状态明细和最新状态两张表。实时路径由一个流作业完成：只读一次 Kafka，在同一个微批里写 ODS、状态明细、起降事件、航段和最新状态，并同步到 PostgreSQL。
 
 ![表间关系：起降事件和航段都从状态明细推出](images/table-lineage.png)
 
@@ -64,18 +64,18 @@
 
 | 层 | 表 | 一行代表 | 主键 | 写入方式 | 刷新 |
 | --- | --- | --- | --- | --- | --- |
-| ODS | ods_flight_state（现 bronze_flights） | 一次轮询中一架飞机的原始状态 | Kafka (partition, offset) | 流式追加 | 5 秒触发 |
+| ODS | ods_flight_state（现 bronze_flights） | 一次轮询中一架飞机的原始状态 | Kafka (partition, offset) | 流式，按 (partition, offset) 只插入 | 5 秒触发 |
 | DWD | dwd_flight_state（改造自 silver_flights） | 一架飞机在一个快照时刻的清洗后状态，含地面记录 | (icao24, event_time) | 流式 foreachBatch，复用批处理的清洗 SQL；回刷时按时间区间覆盖 | 5 秒 |
-| DWD | dwd_airport_event（新增） | 一次起飞或落地 | (icao24, event_time, event_type) | 流式，按主键 MERGE | 5 秒 |
+| DWD | dwd_airport_event（新增） | 一次起飞或落地 | (icao24, event_time, event_type) | 流式，按主键只插入 | 5 秒 |
 | DWD | dwd_flight_leg（新增，累积快照） | 一个航段，从首次出现到落地或飞出覆盖 | leg_id | 流式 foreachBatch + MERGE，进行中持续更新 | 5 秒 |
 | DWS | dws_airport_5min（现 gold_airport_5min） | 一个机场一个 5 分钟窗口 | (window_start, airport_iata) | 按时间区间覆盖 | 15 分钟 |
 | DWS | dws_airport_hourly（新增） | 一个机场一个 UTC 小时的起降统计 | (hour_start, airport_iata) | 按时间区间覆盖 | 15 分钟 |
 | ADS | ads_latest_position（改造） | 每架飞机的最新状态 | icao24 | 流式 MERGE，加“已离开”标记 | 5 秒 |
 | ADS | ads_flight_alert、ads_ml_anomaly | 一条异常告警 | (icao24, event_time, alert_type) | MERGE 同步，删除只限重算区间 | 15 分钟 |
-| 服务层 | PostgreSQL 实时表（最新状态、航段、起降事件） | 同上游 | 同上游 | 与湖内 MERGE 同一个微批，按主键 upsert | 5 秒 |
+| 服务层 | PostgreSQL 实时表（最新状态、航段、起降事件） | 同上游 | 同上游 | 与湖内写入同一个微批，三张表在一个事务里按主键 upsert | 5 秒 |
 | 服务层 | PostgreSQL 统计表（DWS、告警） | 同上游 | 同上游 | Change Data Feed 增量同步 | 15 分钟 |
 
-其余现有表（gold_country_5min、gold_overview_5min、gold_overview_stream 及对应 ADS 表）沿用，只按本文档统一字段名。dwd_flight_state 比现在的 silver_flights 多保留 on_ground 和 squawk 两列，起降判定和应急告警都依赖它们。实时表在同一个微批里 upsert 到 PostgreSQL 并 MERGE 进湖，两边都按主键幂等，微批失败重放不会写重。
+其余现有表（gold_country_5min、gold_overview_5min、gold_overview_stream 及对应 ADS 表）沿用，只按本文档统一字段名。dwd_flight_state 比现在的 silver_flights 多保留 on_ground 和 squawk 两列，起降判定和应急告警都依赖它们。实时表在同一个微批里先 upsert 到 PostgreSQL（三张表一个事务），再写进湖，两边都按主键幂等，微批失败重放不会写重；湖是事实来源，实时作业每次启动先把 PostgreSQL 按湖全量对齐。
 
 ## 指标口径
 
@@ -83,9 +83,9 @@
 
 | 指标 | 定义 | 计算 | 来源表 | 精确度 | 可加性 |
 | --- | --- | --- | --- | --- | --- |
-| 当前进近架数 | 最近 30 秒有更新，且距机场 ≤ 30 km、气压高度 ≤ 3,000 m、垂直速率 ≤ −1 m/s 的飞机 | COUNT(DISTINCT icao24) | ads_latest_position | 精确 | 不可加 |
+| 当前进近架数 | 最近 30 秒有更新（按数据时钟，见“其他”），且距最近机场 ≤ 30 km、气压高度 ≤ 3,000 m、垂直速率 ≤ −1 m/s 的飞机，归属到最近机场 | COUNT(DISTINCT icao24) | ads_latest_position | 精确 | 不可加 |
 | 5 分钟进近架数 | 同上条件，在 5 分钟窗口内出现过的飞机 | COUNT(DISTINCT icao24) | dws_airport_5min | 精确 | 不能跨窗口相加 |
-| 当前离场架数 | 最近 30 秒有更新，且距机场 ≤ 30 km、高度 ≤ 3,000 m、垂直速率 ≥ 1 m/s 的飞机 | COUNT(DISTINCT icao24) | ads_latest_position | 精确 | 不可加 |
+| 当前离场架数 | 最近 30 秒有更新（按数据时钟），且距最近机场 ≤ 30 km、高度 ≤ 3,000 m、垂直速率 ≥ 1 m/s 的飞机，归属到最近机场 | COUNT(DISTINCT icao24) | ads_latest_position | 精确 | 不可加 |
 | 在飞架数 | 窗口内 on_ground 为 false 的飞机 | COUNT(DISTINCT icao24) | gold_overview_5min（批）、gold_overview_stream（流） | 批精确；流式用 HLL，相对误差约 5% | 不能跨窗口相加 |
 | 起飞架次、落地架次 | 统计周期内对应类型的事件数 | COUNT(\*) | dwd_airport_event | 精确，但受采样漏检影响 | 可加 |
 | 小时起降架次 | 起飞架次 + 落地架次，按机场和 UTC 小时 | SUM | dws_airport_hourly | 同上 | 可加 |
@@ -93,7 +93,7 @@
 | 应急事件数 | squawk 为 7500、7600 或 7700，同一航段同一代码只计一次 | COUNT(DISTINCT leg_id, squawk) | dwd_flight_state + dwd_flight_leg | 精确 | 可加 |
 | 异常告警数 | 规则告警和模型告警分开计，不相加 | COUNT(\*) | ads_flight_alert、ads_ml_anomaly | 精确 | 可加 |
 | 数据新鲜度 | 当前时间减去源表最新的 event_time | 秒 | 各 ADS 表 | 精确 | 不可加 |
-| 处理延迟 | 记录写入服务层的时间减去它的 Kafka 写入时间（kafka_ts） | P50、P95，秒 | ods_flight_state 的 kafka_ts + 服务层写入时间 | 精确 | 不可加 |
+| 处理延迟 | 记录写入服务层的时间减去它的 Kafka 写入时间（kafka_ts，取 broker 写入时间，和服务层用同一个时钟） | P50、P95，秒 | ods_flight_state 的 kafka_ts + 服务层写入时间 | 精确 | 不可加 |
 | 采集完整率 | 实收快照轮次 ÷ 应收轮次（按配置的轮询间隔算，10 秒一轮即每分钟 6 轮） | 先汇总分子分母再相除 | ods_flight_state | 精确 | 比值不能直接相加 |
 
 与现状的差异：
@@ -144,7 +144,9 @@
 
 **其他**
 
-- 已离开：ads_latest_position 中最后出现超过 1 分钟的飞机标记为已离开，地图不显示。
+- 数据时钟：已处理数据里最晚的快照时间。“最近 30 秒有更新”“超过 1 分钟”都相对它算，不按机器时间：采集器停了，看板停在最后一张快照，由数据新鲜度提示过期，进近数不会掉成 0；流式结果和全量重算也用同一个时钟。
+- 进近、离场按最近机场归属：ZRH 离最近的其他机场 76 km，30 km 圈内不受影响；米兰的 LIN、BGY、MXP、LUG 两两相距 41–48 km，重叠部分算给更近的机场。
+- 已离开：ads_latest_position 中最后出现时间比数据时钟早 1 分钟以上的飞机标记为已离开，地图不显示。
 - 飞行阶段：地面记录为“地面”；空中按垂直速率判断，大于 1 m/s 为爬升，小于 −1 m/s 为下降，其余为平飞，阈值沿用现有规则。
 - origin_country 是飞机注册国，不是出发地，看板上显示为“注册国”。
 - 只需要空中数据的下游（规则告警、异常检测特征）读 dwd_flight_state 时，先过滤 on_ground = false。
@@ -227,8 +229,8 @@
 | M0 准备与基线 | 确认凭证；采集范围扩大到 90 平方度；维表补录 BGY 和 LUG；检查 ZRH 地面覆盖；记录改造前基线 | 采集器 10 秒一轮跑通、每次请求扣 2 credits（已验证）；地面覆盖结果和改造前延迟有记录 | 半天到 1 天 | 已完成 |
 | M1 状态明细 | 清洗规则抽成流批共用模块；dwd_flight_state 保留地面记录和 squawk，流式写入；ODS 改为 5 秒触发；采集器重试、发送检查和固定节拍轮询 | 同一区间流式结果与批量重算结果完全一致；清洗规则单测通过 | 2 天 | 已完成 |
 | M2 起降事件和航段 | 新建 dwd_airport_event 和 dwd_flight_leg（foreachBatch + MERGE，加 LOST 超时扫描） | 航段切分单测通过；抽查 20 个落地事件 | 3 天 | 已完成 |
-| M3 实时服务层 | ads_latest_position 改为流式 MERGE，同一微批 upsert 到 PostgreSQL；接入 Grafana 实时卡片 | 新鲜度 P95 ≤ 30 秒，处理延迟 P95 ≤ 10 秒 | 2 天 | 未开始 |
-| M4 批链路改造 | 修正进近口径；“航班数”字段改名为“架数”；新建小时起降表；按区间增量计算并支持补数 | 批任务幂等；backfill 演练通过 | 2–3 天 | 未开始 |
+| M3 实时服务层 | ads_latest_position 改为流式 MERGE，同一微批 upsert 到 PostgreSQL；接入 Grafana 实时卡片 | 新鲜度 P95 ≤ 30 秒，处理延迟 P95 ≤ 10 秒 | 2 天 | 已完成（2026-10-21 两小时验收 P95 22.9 / 9.4 秒；每批 < 5 秒只在低峰成立，见 README 的已知限制） |
+| M4 批链路改造 | 修正进近口径；“航班数”字段改名为“架数”；新建小时起降表；按区间增量计算并支持补数 | 批任务幂等；backfill 演练通过 | 2–3 天 | 进行中 |
 | M5 质量与告警 | 质量门禁和 dq_result 表；告警推送；微批积压告警 | 停掉采集器约 30 秒收到 P1 | 2 天 | 未开始 |
 | M6 演练与收尾 | exactly-once 演练；补全 runbook；单测接入 CI；README 写入改造前后的实测数字 | 验收方式表中每一项都有记录 | 2 天 | 未开始 |
 
