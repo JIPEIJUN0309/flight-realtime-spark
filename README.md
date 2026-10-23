@@ -106,12 +106,12 @@ Two hours of continuous operation at a 10-second poll interval, with a sampler w
 |--------|----------|--------|
 | End-to-end freshness | P50 **14.0 s**, P95 **22.9 s** | P95 ≤ 30 s |
 | Processing latency (Kafka append → serving layer) | P50 **7.0 s**, P95 **9.4 s** | P95 ≤ 10 s |
-| Per-batch processing time | P50 **5.6 s**, P95 **6.2 s** | < 5 s (trigger interval) |
+| Per-batch processing time | P50 **5.6 s**, P95 **6.2 s** (2026-10-21) → P50 **3.9 s**, P95 **4.3 s** (2026-10-23) | < 5 s (trigger interval) |
 | Serving-layer atomicity | 0 half-batches, 0 empty tables | 0 |
 
-The two customer-visible targets hold. The batch-time target does not hold during the day: traffic rose from 160 aircraft per snapshot at night to 636 on average and 1,328 at peak, and per-batch time scales with the number of records because flight-leg stitching re-reads a 20-minute lookback and runs window functions over it. On the same code at night (160–375 records per batch) the measurement was P50 4.6 s / P95 5.5 s.
+The two customer-visible targets hold. The batch-time target did **not** hold at acceptance: traffic rose from 160 aircraft per snapshot at night to 636 on average and 1,328 at peak, and a batch took P50 5.6 s / P95 6.2 s, with 97.5% of batches over the 5-second trigger interval. The cost turned out to be fixed overhead rather than data volume: roughly 100 Spark jobs per batch, each compiling generated Java, and the default codegen class cache holds only 100 classes — so most of them were recompiled on every batch (about 170 compilations per batch).
 
-Two conclusions, both actionable. The freshness and latency targets are met with margin at any traffic level measured. The throughput margin is limited by the leg step (about 4.3 s of a 5.6 s batch); the obvious next step is to stop re-reading the lookback from Delta every batch and broadcast only the aircraft in the current batch into the window functions.
+Raising `spark.sql.codegen.cache.maxEntries` to 2000 cut that to about 35 compilations per batch. A two-hour re-run on 2026-10-23 (721 batches, the same 10-second polling, up to 685 aircraft airborne) measured **P50 3.9 s, P95 4.3 s, P99 4.6 s**, with **0.3%** of batches over 5 s — the throughput target now holds. The remaining margin is thinnest on catch-up: a single 14k-record batch took 9.7 s. The leg step is still the largest single cost, so the next structural improvement is to broadcast only the current batch's aircraft into the window functions instead of re-reading the lookback from Delta.
 
 ### 2. Streaming vs. Batch
 
@@ -404,7 +404,7 @@ Real problems encountered and fixed during development.
 - The anomaly feature extraction (ml_features.py) and scoring (ml_score.py) still scan the full state detail on every batch rather than the current interval plus a lookback window, so they get slower as history grows; the batch path itself is interval-scoped.
 - The alert engine runs as a plain polling process. It is restart-safe (alerts are stored in PostgreSQL) but it is not clustered: running two instances would double-notify unless the dedupe table is used as the lock.
 - The statistics dashboard refresh is limited by the 15-minute batch chain, so the hourly and traffic panels lag the live cards by up to one DAG interval.
-- Per-batch latency misses its 5-second target: P50 5.5 s, P95 6.2 s, and 97.5% of batches exceed 5 s at daytime traffic. The cost is fixed overhead (about 100 Spark jobs per batch, each compiling generated code), not data volume — raising the codegen class cache is the next experiment. The backlog alert threshold is therefore tied to the 10-second processing-latency SLA, not to the 5-second trigger interval.
+- Per-batch latency missed its 5-second target at acceptance (P50 5.6 s / P95 6.2 s, 97.5% of batches over 5 s) and met it after raising the codegen cache (2026-10-23 re-test: P50 3.9 s / P95 4.3 s, 0.3% over 5 s). The margin still thins on traffic spikes — one 14k-record catch-up batch took 9.7 s — so the backlog alert threshold stays tied to the 10-second processing-latency SLA rather than to the 5-second trigger interval.
 
 ---
 
