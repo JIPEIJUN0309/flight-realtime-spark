@@ -132,6 +132,13 @@ def build_spark() -> SparkSession:
         .config("spark.sql.maxPlanStringLength", "200000")
         # 不再用的缓存块由 driver 的垃圾回收触发清理，默认 30 分钟一次，这里改成 2 分钟
         .config("spark.cleaner.periodicGC.interval", "2min")
+        # 每批要编译几百个生成类，默认缓存只存 100 个，按 LRU 淘汰后每批都得重编。
+        # 云端对比压测：缓存 100 → 100,000 个类，每批编译次数 319 → 39，批耗时 −15%。
+        # 这里取 2000 已经足够覆盖一批用到的类，内存代价可以忽略（项目报告 M4）。
+        .config("spark.sql.codegen.cache.maxEntries", "2000")
+        # 没有新数据时每 5 秒回调一次 onQueryIdle（默认 10 分钟），
+        # 作业靠它写心跳，告警引擎才能区分"作业停了"和"采集停了"（项目报告 M1）。
+        .config("spark.sql.streaming.noDataProgressEventInterval", "5000")
         .getOrCreate()
     )
 
@@ -671,7 +678,17 @@ class BatchLogListener(StreamingQueryListener):
             print(f"[rt] 记批次耗时失败（不影响作业）：{e}")
 
     def onQueryIdle(self, event) -> None:
-        pass
+        """没有新数据时不回调 onQueryProgress（Spark 3.5 实测），这里补一次心跳。
+
+        采集器一停，rt_batch_log 就不再有新行；只按批次时间判断，会把"采集中断"
+        误报成"流作业停止"。心跳表的语义是"作业还活着，只是没数据"（项目报告 M1）。
+        """
+        try:
+            self.client.execute(
+                "INSERT INTO rt_heartbeat (id, beat_at) VALUES (1, now()) "
+                "ON CONFLICT (id) DO UPDATE SET beat_at = EXCLUDED.beat_at")
+        except Exception as e:  # noqa: BLE001 —— 心跳写不进去不影响作业
+            print(f"[rt] 写心跳失败（不影响作业）：{e}")
 
     def onQueryTerminated(self, event) -> None:
         self.client.close()
@@ -698,6 +715,9 @@ def run_stream(spark: SparkSession, available_now: bool) -> None:
     specs = pg_sync.table_specs(spark.read.format("delta").load(DWD_STATE_PATH).limit(0))
     pg = pg_sync.PgClient(spark)
     pg_sync.ensure_schema(pg, list(specs.values()))
+    # 空闲心跳（onQueryIdle 写，告警引擎读）：采集停了也要有"作业还活着"的证据
+    pg.execute("CREATE TABLE IF NOT EXISTS rt_heartbeat ("
+               "id int PRIMARY KEY, beat_at timestamptz NOT NULL)")
     lake = lake_frames(spark)
     started = time.time()
     full = pg_sync.sync(pg, [(specs[k], lake[k]) for k in ("latest", "legs", "events")], "full", clock)

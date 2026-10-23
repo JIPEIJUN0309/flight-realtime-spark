@@ -1,11 +1,11 @@
 # ============================================================
-# 阶段二：Kafka + Spark + PostgreSQL + Metabase 全套
-# （在阶段一 Kafka 基础上，新增 spark / postgres / metabase）
+# 主栈：Kafka + Spark + PostgreSQL + Grafana
+# （Kafka UI 看消息，Grafana 看实时卡片和统计报表）
 # ============================================================
 
 # 固定 project 名，不随所在目录名变化。
 # 否则 compose 拿目录名当 project 名，一旦目录改名或移动，named volume
-# 前缀就变了 —— kafka_data / postgres_data 会失联，Metabase 看板和
+# 前缀就变了 —— kafka_data / postgres_data 会失联，Grafana 看板和
 # Kafka 里的数据全部对不上。
 name: flight-realtime-spark
 
@@ -64,6 +64,10 @@ services:
       # 限制 glibc 的每线程 arena：实时作业跑两小时后 JVM 堆只用了 1.3/2 GB，
       # 容器 anon 却涨到 4.6 GB 并被 cgroup OOM 杀掉。设成 2 之后稳定在 2.4–3.4 GB。
       MALLOC_ARENA_MAX: "2"
+      # 质量规则的完整率分母按采集间隔算（dq_checks 的 DQ_POLL_INTERVAL）。
+      # 采集器读 .env 的 POLL_INTERVAL，容器里必须拿到同一个值：否则平时 30 秒轮询时
+      # 完整率只有约 33%，强规则会误判失败、把 ADS 挡掉（项目报告 M10）。
+      DQ_POLL_INTERVAL: "${POLL_INTERVAL:-10}"
     depends_on:
       kafka:
         condition: service_healthy
@@ -82,7 +86,7 @@ services:
       resources:
         limits:
           # M3 验收时踩到的坑：4g 在早高峰（每张快照 375 架、每批 5 秒）被 cgroup OOM 杀掉过一次
-          # （memory.events 里 oom_kill=1，驱动进程直接消失）。5g 留出余量；同时把 Metabase 停掉
+          # （memory.events 里 oom_kill=1，驱动进程直接消失）。5g 留出余量；同时把 Grafana 的
           # 让出虚拟机内存。再往上加要看 Docker Desktop 给虚拟机分配了多少内存
           memory: 5g
 

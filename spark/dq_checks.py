@@ -344,7 +344,12 @@ def write_results(spark: SparkSession, df: DataFrame, start: str, end: str) -> N
 
 
 def write_to_pg(df: DataFrame) -> None:
-    """往 PostgreSQL 写一份，服务层的告警引擎和看板直接查，不用读 Delta。"""
+    """往 PostgreSQL 写一份，服务层的告警引擎和看板直接查，不用读 Delta。
+
+    ★ truncate 而不是 DROP 重建：dq_result 每 15 分钟重写一次，DROP 之后表的 oid 变了，
+      grafana_ro 的 SELECT 权限随之丢失，统计看板的质量面板会一直报 permission denied，
+      直到下次重启实时作业才补回来（项目报告 M3）。
+    """
     (
         df.write.format("jdbc")
         .option("url", PG_URL)
@@ -353,6 +358,7 @@ def write_to_pg(df: DataFrame) -> None:
         .option("password", PG_PROPS["password"])
         .option("driver", PG_PROPS["driver"])
         .option("batchsize", "100")
+        .option("truncate", "true")
         .mode("overwrite")
         .save()
     )

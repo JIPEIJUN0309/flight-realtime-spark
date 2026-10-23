@@ -298,9 +298,9 @@ def write_to_pg(df: DataFrame, table: str) -> None:
         .option("driver", PG_PROPS["driver"])
         .option("batchsize", "1000")
         # ★ 用 truncate 而不是 drop 重建：
-        #   Spark 的 overwrite 默认是 DROP TABLE + CREATE，表被删掉重建后，Metabase 里
-        #   按字段 ID 保存的卡片全部失效（每次批任务都会把看板弄坏一次）。truncate 只清空
-        #   行、保留表和列，Metabase 的字段元数据不会失效。
+        #   Spark 的 overwrite 默认是 DROP TABLE + CREATE，表被删掉重建后，按字段 ID 绑定的
+        #   看板卡片全部失效（每次批任务都会把看板弄坏一次）。truncate 只清空
+        #   行、保留表和列，看板的字段元数据不会失效。
         #   代价：表结构必须和 DataFrame 一致；改列名之后要先手工 DROP 一次让 Spark 重建。
         .option("truncate", "true")
         .mode("overwrite")
@@ -311,6 +311,19 @@ def write_to_pg(df: DataFrame, table: str) -> None:
 
 def sync_pg(spark: SparkSession, name: str, table: str | None = None) -> None:
     write_to_pg(spark.read.format("delta").load(f"{ADS_BASE}/{name}"), table or f"ads_{name}")
+
+
+def replace_table(spark: SparkSession, df: DataFrame, path: str) -> int:
+    """整表替换一张 Delta 表，返回行数。
+
+    给「源本来就是全量重算」的作业用（比如 ml_score：模型或阈值一换，
+    上一版算出来的行必须整批作废，而不是按区间留着）。和 write_ads 的
+    区间 MERGE 是两种语义，别混用。
+    """
+    rows = df.count()
+    (df.write.format("delta").mode("overwrite")
+     .option("overwriteSchema", "true").save(path))
+    return rows
 
 
 # ================================================================
@@ -360,31 +373,45 @@ def _range(df: DataFrame, col: str, start: str, end: str) -> DataFrame:
 
 
 # ================================================================
-#  质量门禁：最近一次 dq_checks 说不能发布，就不发布
+#  质量门禁：本次区间的 dq_checks 说不能发布，就不发布
 # ================================================================
-def dq_gate(spark: SparkSession) -> tuple[bool, str]:
+def dq_gate(spark: SparkSession, start: str | None = None,
+            end: str | None = None) -> tuple[bool, str]:
     """读 dq_checks 写的 ads_gate 行。返回 (能不能发布, 说明)。
 
-    Airflow 里 dq_checks 在 ads_export 之前，强规则失败时 DAG 根本不会走到这里；
-    这个检查是给手动跑和不经过 DAG 的场景兜底的。
+    优先找**本次区间**对应的门禁行：Airflow 里 dq_checks 跑的是同一个
+    [start, end)，强规则失败时 DAG 根本不会走到这里；这一步是给手动跑、补数
+    和"门禁行写晚了"的场景兜底的。找不到本次区间的行时，才退回最近一次门禁
+    （带过期判断），保证不会拿一段旧结果去挡新数据。
     """
     if not DeltaTable.isDeltaTable(spark, DQ_PATH):
         return True, "还没有质量检查结果"
-    row = (
+
+    gates = (
         spark.read.format("delta").load(DQ_PATH)
         .where("rule_code = 'ads_gate'")
-        .orderBy(F.col("checked_at").desc())
-        .limit(1)
         .select("passed", "detail", "interval_start", "interval_end",
                 F.expr("timestampdiff(MINUTE, checked_at, current_timestamp())").alias("age_min"))
-        .first()
     )
+
+    if start and end:
+        exact = (gates
+                 .where(F.col("interval_start") == F.lit(start).cast("timestamp"))
+                 .where(F.col("interval_end") == F.lit(end).cast("timestamp"))
+                 .orderBy(F.col("interval_start").desc())
+                 .first())
+        if exact is not None:
+            if exact["passed"]:
+                return True, f"本次区间 [{start}, {end}) 的质量强规则全部通过"
+            return False, (f"本次区间 [{start}, {end}) 有强规则未通过：{exact['detail']}")
+
+    row = gates.orderBy(F.col("interval_start").desc()).first()
     if row is None:
         return True, "还没有 ads_gate 记录"
     if row["age_min"] is not None and row["age_min"] > DQ_MAX_AGE_MIN:
         return True, f"最近一次质量检查是 {row['age_min']} 分钟前，已过期"
     if row["passed"]:
-        return True, "质量强规则全部通过"
+        return True, "质量强规则全部通过（最近一次）"
     return False, (f"{row['detail']}（区间 {row['interval_start']} → {row['interval_end']} UTC）")
 
 
@@ -427,7 +454,7 @@ def run(spark: SparkSession, start: str | None, end: str | None,
           f"| 高度>{TH_HIGH_ALT} m")
     print("=" * 66)
 
-    publish, why = dq_gate(spark)
+    publish, why = dq_gate(spark, start, end)
     if not publish and not ignore_dq:
         print(f"[ads] 质量门禁未通过，这一段不发布：{why}")
         print("[ads] 看板继续显示上一版；修好数据后重跑 dq_checks.py 再跑本作业。")

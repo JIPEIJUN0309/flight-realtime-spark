@@ -89,7 +89,7 @@ M4 起批链路是 `dws_batch.py` → `ads_export.py` → `ml_features.py` → `
 Airflow：
 
 - 调度是 `*/15 * * * *`，每个任务带本次的 `data_interval_start/end`，并往前多看 1 小时
-- 补数：`docker exec airflow-scheduler airflow dags backfill flight_batch_pipeline --start-date 2026-10-20 --end-date 2026-10-21`（容器名以 `docker-compose.airflow.yml` 为准），每个区间单独跑一次，互不影响
+- 补数：`docker exec flight-airflow-scheduler airflow dags backfill flight_batch_pipeline --start-date 2026-10-20 --end-date 2026-10-21`（容器名以 `docker-compose.airflow.yml` 为准），每个区间单独跑一次，互不影响
 - 同一时间只跑一条链（`max_active_runs=1`），失败重试 1 次、间隔 2 分钟
 
 ### 质量门禁与告警
@@ -98,7 +98,7 @@ Airflow：
 
 - 手动跑一段：`docker exec -it spark /opt/spark/bin/spark-submit /opt/spark/work-dir/jobs/dq_checks.py --start "2026-10-20 00:00" --end "2026-10-20 06:00"`。不加 `--fail-on-strong` 时只记录、不失败，排查用这个
 - 结果：Delta 的 `/data/delta/dq_result`（按天分区，保留历史），PostgreSQL 的 `dq_result`（每次覆盖，给告警引擎和看板查）
-- 采集频率改了要同步 `DQ_POLL_INTERVAL`（默认 10 秒），否则完整性规则的分母是错的；采集范围改了同步 `BBOX_*`
+- 完整性规则的分母按 `DQ_POLL_INTERVAL` 算：`docker-compose.yml` 已经从 `.env` 的 `POLL_INTERVAL` 把它传进容器，改采集频率只要改 `.env` 一个地方；采集范围改了同步 `BBOX_*`
 - 某条弱规则一直不过：先看 `detail` 里的数字，再对照 `docs/requirements.md` 的阈值；调阈值属于改口径，先改文档
 
 告警引擎（`alert_engine.py`）是一个常驻的 Python 进程，每 15 秒查一次 PostgreSQL：
@@ -110,6 +110,8 @@ docker exec spark pkill -f alert_engine.py                                  # �
 ```
 
 - 推送：`docker-compose.yml` 里给 spark 服务加 `ALERT_WEBHOOK_URL`（飞书/钉钉机器人地址）和 `ALERT_WEBHOOK_KIND`（`feishu` / `dingtalk`），不配就只写库和日志
+- 作业存活判定：实时作业没有新数据时会回调 `onQueryIdle` 写一条心跳到 `rt_heartbeat`；引擎取"最近一批"和"心跳"里更新的那个，所以采集停了报的是「采集中断」而不是「流作业停止」
+- 应急代码告警不自动关闭：确认后执行 `docker exec spark python3 /opt/spark/work-dir/jobs/alert_engine.py --ack <告警编号>`，下一轮会标成已恢复；同一航段同一个代码在整个历史里只推一次
 - 告警记录：`SELECT * FROM alert_event ORDER BY fired_at DESC LIMIT 20`；未恢复的告警 `cleared_at IS NULL`
 - 规则和阈值见 `docs/requirements.md`「告警规则」，代码里的常量在 `spark/alert_engine.py` 顶部
 - 演练采集中断：停掉采集器约 40 秒（`Ctrl+C` 或 `Stop-Process`），引擎在 30 秒后写一条 P1「采集中断」；恢复采集后下一轮自动写 `cleared_at`
@@ -150,8 +152,8 @@ docker exec spark pkill -f alert_engine.py                                  # �
 
 ### 5. 流式 MERGE 与回刷同时写一张表
 
-- 现象：
-- 定位：
+- 现象：回刷任务和常驻流作业写同一张 Delta 表时，作业日志报 `ConcurrentAppendException` / `ConcurrentModificationException`，重试几次后失败退出；或者回刷跑完后发现某个窗口被流作业又改回去了
+- 定位：`docker exec spark bash -c "grep -E 'Concurrent(Append|Modification)' /opt/spark/work-dir/jobs/rt_live.log | tail"`；再对同一个表的 `_delta_log` 看最近几次提交的时间，确认两边是否在同一分钟内写同一张表
 - 恢复：`dwd_state.py` 的 MERGE 遇到 Delta 并发冲突会自动重试 3 次；回刷失败直接重跑，它按区间覆盖，重跑结果一样
 - 验证标准：记录 Delta 并发冲突的现象，以及错开分区或暂停流之后的结果
 - 演练记录：未演练。M4 之后回刷的是 DWS 表、实时作业写的是 DWD/ADS，两者不再写同一张表；真正会重叠的是 `ads_export` 的告警 MERGE 和 `rt_pipeline` 的最新状态表，它们写的是不同表。并发冲突的兜底仍是 Delta 的重试 + 按区间覆盖

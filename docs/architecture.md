@@ -65,13 +65,13 @@ dwd_airport_event ─┘                   gold_country_5min / gold_overview_5mi
 | ODS | bronze_flights | `/data/delta/bronze_flights` | 无（平铺） | (partition, offset) 语义 | 流式追加 | 5 秒 |
 | DWD | dwd_flight_state | `/data/delta/dwd_flight_state` | `dt`（UTC 日期） | (icao24, event_time) | 流式 MERGE 只插入；`backfill` 按区间 `replaceWhere` | 5 秒 |
 | DWD | dwd_airport_event | `/data/delta/dwd_airport_event` | `dt` | (icao24, event_time, event_type) | 流式只插入 | 5 秒 |
-| DWD | dwd_flight_leg | `/data/delta/dwd_flight_leg` | `dt` | leg_id | 流式 MERGE 累积更新 | 5 秒 |
+| DWD | dwd_flight_leg | `/data/delta/dwd_flight_leg` | `dt` | leg_id | 每批按主键整段替换（`replace_rows`），累积快照 | 5 秒 |
 | DWS | dws_airport_5min | `/data/delta/dws_airport_5min` | `dt` | (window_start, airport_iata) | 批处理 `replaceWhere` | 15 分钟 |
 | DWS | dws_airport_hourly | `/data/delta/dws_airport_hourly` | `dt` | (hour_start, airport_iata) | 批处理 `replaceWhere` | 15 分钟 |
 | DWS | gold_country_5min | `/data/delta/gold_country_5min` | `dt` | (window_start, origin_country) | 批处理 `replaceWhere` | 15 分钟 |
 | DWS | gold_overview_5min | `/data/delta/gold_overview_5min` | `dt` | window_start | 批处理 `replaceWhere` | 15 分钟 |
 | DWS | gold_overview_stream | `/data/delta/gold_overview_stream` | `dt` | window_start | 可选流式作业 `dws_gold_stream.py`，当前不服务看板 | 30 秒 |
-| ADS | ads_latest_position | `/data/delta/ads/latest_position` | 无 | icao24 | 流式 MERGE | 5 秒 |
+| ADS | ads_latest_position | `/data/delta/ads/latest_position` | 无 | icao24 | 每批按主键整段替换（`replace_rows`） | 5 秒 |
 | ADS | ads_airport_traffic 等 5 张 | `/data/delta/ads/*` | `dt` | 窗口 + 维度 | 批处理 MERGE（删除只限重算区间） | 15 分钟 |
 | 服务层 | PG 实时三张表 | PostgreSQL | — | 同上游 | 微批内一个事务 upsert | 5 秒 |
 | 服务层 | PG 统计表 | PostgreSQL | — | 同上游 | 整表覆盖（见已知限制） | 15 分钟 |

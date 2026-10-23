@@ -1,6 +1,6 @@
 # Grafana 启动时自动建好数据源，不用在界面里手动配置。
 # 用只读账号 grafana_ro：它只能读实时表和视图（由 spark/pg_sync.py 建表时授权），
-# 看不到同一个库里 Metabase 自己的表，也改不了数据。
+# 只能读被授权的表，看不到同一库里其他应用的表，也改不了数据。
 apiVersion: 1
 
 datasources:

@@ -28,8 +28,9 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
     # webserver 与 scheduler 必须共用同一套密钥，否则会话/加密对不上
-    AIRFLOW__CORE__FERNET_KEY: "mgkyGiQYdk7LMvHvz_JmZw5BFM3Pu2WDWrugoJruIxg="
-    AIRFLOW__WEBSERVER__SECRET_KEY: "flight-airflow-demo-secret"
+    # 密钥从 .env 读；没配时用这个只够本地演示的默认值。换环境务必改掉
+    AIRFLOW__CORE__FERNET_KEY: "${AIRFLOW_FERNET_KEY:-mgkyGiQYdk7LMvHvz_JmZw5BFM3Pu2WDWrugoJruIxg=}"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "${AIRFLOW_WEBSERVER_SECRET:-flight-airflow-demo-secret}"
     AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
     # 关掉没必要的健康告警噪音
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"

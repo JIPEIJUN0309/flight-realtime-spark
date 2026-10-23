@@ -34,6 +34,11 @@ APPROACH_MAX_ALT_M = 3000.0  # ……气压高度不超过 3,000 m
 APPROACH_VERTICAL_RATE = 1.0  # ……垂直速率 ≤ −1 m/s 算进近，≥ 1 m/s 算离场
 NEAR_AIRPORT_KM = 50.0       # "机场附近"：距最近机场不超过 50 km（沿用原口径）
 
+# 维表（dim/airports.csv）里有 22 个机场，其中 VIE、SZG 在采集范围（北纬 43–52°、
+# 东经 2.5–12.5°）之外，只用于给边缘位置算方位。机场级指标只统计范围覆盖的 20 个，
+# 否则它们的"最近机场"会把流量排名拉偏（约 0.3% 的位置）。
+OUT_OF_COVERAGE = frozenset({"VIE", "SZG"})
+
 AIRPORT_COLUMNS = [
     "window_start", "window_end", "airport_iata", "airport_city",
     "aircraft_cnt", "record_cnt", "avg_altitude_m", "avg_speed_kmh",
@@ -97,6 +102,9 @@ def airport_5min(states: DataFrame) -> DataFrame:
     w = _window().alias("_w")
     return (
         states
+        # 只保留采集范围覆盖的机场：维表里还有 VIE、SZG 两个范围外的机场，
+        # 只用来给边缘位置算方位；它们出现在流量排名里会让口径失真（约 0.3% 的位置）。
+        .where(~F.col("near_airport_iata").isin(*OUT_OF_COVERAGE))
         .groupBy(w, "near_airport_iata", "near_airport_city")
         .agg(
             F.countDistinct("icao24").alias("aircraft_cnt"),
@@ -134,6 +142,8 @@ def airport_hourly(events: DataFrame) -> DataFrame:
     hour = F.date_trunc("hour", F.col("event_time")).alias("hour_start")
     return (
         events
+        # 同 airport_5min：范围外的机场（VIE、SZG）不出小时起降指标
+        .where(~F.col("airport_iata").isin(*OUT_OF_COVERAGE))
         .groupBy(hour, "airport_iata", "airport_city")
         .agg(
             F.sum(F.when(F.col("event_type") == "TAKEOFF", 1).otherwise(0))

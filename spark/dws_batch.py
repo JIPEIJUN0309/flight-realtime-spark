@@ -216,7 +216,8 @@ def _replace_condition(col: str, start: str, end: str) -> str:
 
 
 def write_interval(spark: SparkSession, df: DataFrame, path: str, col: str,
-                   start: str, end: str, name: str, rows: int) -> None:
+                   start: str, end: str, name: str, rows: int,
+                   rebuild: bool = False) -> None:
     if not DeltaTable.isDeltaTable(spark, path):
         (df.write.format("delta").mode("overwrite")
          .option("overwriteSchema", "true").partitionBy("dt").save(path))
@@ -225,6 +226,12 @@ def write_interval(spark: SparkSession, df: DataFrame, path: str, col: str,
 
     existing = spark.read.format("delta").load(path)
     if set(existing.columns) != set(df.columns):
+        if not rebuild:
+            # 按区间覆盖遇到表结构变化：只能重建到 --end 为止，后面的窗口会被删掉。
+            # 和 ads_export 一样直接报错，让人先跑一次整表重建（项目报告 L2）。
+            raise RuntimeError(
+                f"[dws] {name} 的表结构和代码不一致，不能按区间覆盖。"
+                "先不带 --start/--end 跑一次 dws_batch.py 让整表重建，再补数。")
         # 代码改了列名或加了列。DWS 是从上游算出来的派生数据，整表重建最省事，
         # 也不会留下"新列全空"的历史行。
         print(f"[dws] {name}: 表结构变了（{len(existing.columns)} 列 → {len(df.columns)} 列），整表重建")
@@ -263,9 +270,15 @@ def run(spark: SparkSession, start: str | None = None, end: str | None = None,
     print("=" * 66)
 
     tasks = []
+    rebuild = rebuild_h = False
     if only in (None, "5min"):
         first = first_source_time(spark, DWD_STATE_PATH)
-        if _needs_rebuild(spark, "5min"):
+        rebuild = _needs_rebuild(spark, "5min")
+        if rebuild and start is not None:
+            raise SystemExit(
+                "[dws] 5 分钟表结构和代码不一致：带 --start/--end 补数会把区间之后的历史删掉。"
+                "先不带区间跑一次整表重建，再补数。")
+        if rebuild:
             start = first
             print("[dws] 5 分钟表结构有变，这次整表重建（区间自动扩到全部历史）")
         s5, e5 = resolve_interval(
@@ -275,7 +288,12 @@ def run(spark: SparkSession, start: str | None = None, end: str | None = None,
     if only in (None, "hourly"):
         _require(spark, DWD_EVENT_PATH, "起降事件表")
         first = first_source_time(spark, DWD_EVENT_PATH)
-        if _needs_rebuild(spark, "hourly"):
+        rebuild_h = _needs_rebuild(spark, "hourly")
+        if rebuild_h and start is not None:
+            raise SystemExit(
+                "[dws] 小时表结构和代码不一致：带 --start/--end 补数会把区间之后的历史删掉。"
+                "先不带区间跑一次整表重建，再补数。")
+        if rebuild_h:
             start = first
             print("[dws] 小时表结构有变，这次整表重建（区间自动扩到全部历史）")
         sh, eh = resolve_interval(
@@ -298,7 +316,8 @@ def run(spark: SparkSession, start: str | None = None, end: str | None = None,
             rows = df.count()
             write_interval(spark, df, TABLE_PATHS[name],
                            "hour_start" if name == "airport_hourly" else "window_start",
-                           s, e, name, rows)
+                           s, e, name, rows,
+                           rebuild=rebuild if kind == "5min" else rebuild_h)
             print(f"[dws] {name}: [{s}, {e}) UTC → {rows} 行")
 
         print(f"[dws] {kind}: 区间 [{s}, {e}) 用时 {time.time() - started:.1f} 秒")

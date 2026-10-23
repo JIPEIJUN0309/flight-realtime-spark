@@ -23,6 +23,7 @@ OpenSky → Kafka 生产者（阶段一核心）
 import os
 import json
 import time
+from datetime import datetime, timezone
 import signal
 import sys
 
@@ -94,13 +95,13 @@ def create_kafka_producer() -> KafkaProducer:
                 # Kafka 不可用时，send() 最多阻塞 10 秒就报错（默认 60 秒），不拖住整轮
                 max_block_ms=10_000,
             )
-            print(f"[kafka] 已连接 {KAFKA_BOOTSTRAP}")
+            log(f"[kafka] 已连接 {KAFKA_BOOTSTRAP}")
             return producer
         # NoBrokersAvailable 是 KafkaError 的子类。Docker 或 Kafka 容器根本没起来时，
         # 建连阶段还可能抛 ValueError（例如 "Invalid file object: None"）或 OSError
         except (KafkaError, ValueError, OSError) as e:
             last_error = e
-            print(f"[kafka] 第 {attempt} 次连接失败（{type(e).__name__}），2 秒后重试…")
+            log(f"[kafka] 第 {attempt} 次连接失败（{type(e).__name__}），2 秒后重试…")
             time.sleep(2)
     raise RuntimeError(
         f"无法连接 Kafka（{KAFKA_BOOTSTRAP}）：{last_error!r}。"
@@ -122,6 +123,11 @@ class SendStats:
         self.last_error = exc
 
 
+def log(msg: str) -> None:
+    """带 UTC 时间戳的日志：演练记录要按时间对账，裸 print 没法定位。"""
+    print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
+
+
 def fetch_states(tokens: TokenManager) -> dict:
     """调用 OpenSky 拉一次数据。返回解析后的 JSON，失败返回 None。"""
     try:
@@ -132,30 +138,36 @@ def fetch_states(tokens: TokenManager) -> dict:
             timeout=20,
         )
     except requests.RequestException as e:
-        print(f"[opensky] 请求异常：{e}")
+        log(f"[opensky] 请求异常：{e}")
         return None
 
-    # 429 = 额度用完，读一下要等多久
+    # 429 = 额度用完。头里给了要等多久就真的等，否则主循环会每秒空转、日志刷屏
     if resp.status_code == 429:
-        retry = resp.headers.get("X-Rate-Limit-Retry-After-Seconds", "?")
-        print(f"[opensky] 额度用尽(429)，需等待 {retry} 秒")
+        raw = resp.headers.get("X-Rate-Limit-Retry-After-Seconds", "")
+        try:
+            wait = int(raw)
+        except (TypeError, ValueError):
+            wait = 60
+        wait = max(1, min(wait, 3600))
+        log(f"[opensky] 额度用尽(429)，按 Retry-After 等待 {wait} 秒")
+        time.sleep(wait)
         return None
     if resp.status_code == 400:
-        print("[opensky] 400：通常是时间戳超过 1 小时限制，检查请求参数")
+        log("[opensky] 400：通常是时间戳超过 1 小时限制，检查请求参数")
         return None
     if resp.status_code != 200:
-        print(f"[opensky] 非预期状态码 {resp.status_code}")
+        log(f"[opensky] 非预期状态码 {resp.status_code}")
         return None
 
     # 顺便打印剩余额度，便于监控配额
     remaining = resp.headers.get("X-Rate-Limit-Remaining")
     if remaining is not None:
-        print(f"[opensky] 本次请求成功，剩余额度 {remaining}")
+        log(f"[opensky] 本次请求成功，剩余额度 {remaining}")
 
     try:
         return resp.json()
     except ValueError as e:  # 响应不是合法 JSON，比如传输中被截断
-        print(f"[opensky] 响应解析失败：{e}")
+        log(f"[opensky] 响应解析失败：{e}")
         return None
 
 
@@ -163,7 +175,7 @@ def poll_once(round_no: int, tokens: TokenManager, producer: KafkaProducer) -> N
     """拉一次快照，逐条写进 Kafka，并确认这一轮写入的结果。"""
     data = fetch_states(tokens)
     if not (data and data.get("states")):
-        print(f"[round {round_no}] 本轮无数据（可能该区域此刻航班少或请求失败）")
+        log(f"[round {round_no}] 本轮无数据（可能该区域此刻航班少或请求失败）")
         return
 
     snapshot_time = data.get("time")
@@ -180,30 +192,30 @@ def poll_once(round_no: int, tokens: TokenManager, producer: KafkaProducer) -> N
     producer.flush(timeout=FLUSH_TIMEOUT)
 
     if stats.failed:
-        print(f"[round {round_no}] 警告：{stats.failed}/{stats.sent} 条写入 Kafka 失败，"
+        log(f"[round {round_no}] 警告：{stats.failed}/{stats.sent} 条写入 Kafka 失败，"
               f"最近一次错误：{stats.last_error!r}")
     else:
-        print(f"[round {round_no}] 已发送 {stats.sent} 条航班记录 → Kafka")
+        log(f"[round {round_no}] 已发送 {stats.sent} 条航班记录 → Kafka")
 
 
 def run():
-    print("=" * 56)
-    print("  OpenSky → Kafka 采集器启动")
-    print(f"  区域(bbox): {BBOX}")
-    print(f"  采集间隔  : {POLL_INTERVAL} 秒")
-    print(f"  目标 topic: {KAFKA_TOPIC} @ {KAFKA_BOOTSTRAP}")
-    print("=" * 56)
+    log("=" * 56)
+    log("  OpenSky → Kafka 采集器启动")
+    log(f"  区域(bbox): {BBOX}")
+    log(f"  采集间隔  : {POLL_INTERVAL} 秒")
+    log(f"  目标 topic: {KAFKA_TOPIC} @ {KAFKA_BOOTSTRAP}")
+    log("=" * 56)
 
     tokens = TokenManager(CLIENT_ID, CLIENT_SECRET)
     producer = create_kafka_producer()
 
     # 优雅退出：Ctrl+C 时把缓冲刷完再退
     def shutdown(signum, frame):
-        print("\n[exit] 收到停止信号，刷新缓冲并关闭…")
+        log("\n[exit] 收到停止信号，刷新缓冲并关闭…")
         try:
             producer.flush(timeout=FLUSH_TIMEOUT)
         except KafkaError as e:
-            print(f"[exit] 还有消息没写进 Kafka：{e!r}")
+            log(f"[exit] 还有消息没写进 Kafka：{e!r}")
         producer.close(timeout=5)
         sys.exit(0)
 
@@ -218,7 +230,7 @@ def run():
             poll_once(round_no, tokens, producer)
         except KafkaError as e:
             # Kafka 中途不可用：这一轮算丢失（下游的采集完整率会体现），下一轮照常
-            print(f"[round {round_no}] 写入 Kafka 失败（{type(e).__name__}: {e}），下一轮继续")
+            log(f"[round {round_no}] 写入 Kafka 失败（{type(e).__name__}: {e}），下一轮继续")
 
         # 固定节拍：下一轮按计划时间发出，不受这一轮耗时影响
         next_tick += POLL_INTERVAL

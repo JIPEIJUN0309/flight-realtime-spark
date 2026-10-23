@@ -50,7 +50,9 @@ COLLECT_STALL_S = 30        # 连续 30 秒（3 轮）没有新快照
 CARD_STALE_S = 30.0         # 实时卡片新鲜度超过它……
 CARD_STALE_HOLD_S = 60      # ……并持续这么久才报
 BACKLOG_BATCHES = 3         # 连续几个批超时才报积压
-BACKLOG_MS = 5000           # 微批触发间隔
+# 阈值挂在"处理延迟"而不是触发间隔上：验收时 97.5% 的批都 ≥ 5 秒，按 5 秒报会一直成立，
+# 值班会习惯性忽略这条告警。SLA 的处理延迟目标是 10 秒，所以连续 3 批超过 8 秒才报（M2）。
+BACKLOG_MS = int(os.getenv("ALERT_BACKLOG_MS", "8000"))
 DQ_RECENT_MIN = 30          # 只看最近半小时的质量检查结果
 
 # 进程名模式：告警引擎和实时作业跑在同一个 spark 容器里，可以直接看进程在不在。
@@ -69,11 +71,23 @@ CREATE TABLE IF NOT EXISTS alert_event (
     notified_at timestamptz,
     cleared_at  timestamptz
 );
+-- 应急告警要人工确认才关闭（项目报告 M7）
+ALTER TABLE alert_event ADD COLUMN IF NOT EXISTS acknowledged_at timestamptz;
+-- 实时作业的空闲心跳：没有新数据时也要能证明"作业还活着"（项目报告 M1）
+CREATE TABLE IF NOT EXISTS rt_heartbeat (
+    id      int PRIMARY KEY,
+    beat_at timestamptz NOT NULL
+);
 -- 同一个 alert_key 同时只能有一个未恢复的告警
 CREATE UNIQUE INDEX IF NOT EXISTS alert_event_open
     ON alert_event (alert_key) WHERE cleared_at IS NULL;
 CREATE INDEX IF NOT EXISTS alert_event_fired ON alert_event (fired_at DESC);
 """
+
+
+def log(msg: str) -> None:
+    """带 UTC 时间戳的日志：演练和对账都要按时间定位，裸 print 对不上。"""
+    print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
 
 
 def connect():
@@ -102,16 +116,30 @@ class AlertEngine:
 
     # ---------------- 规则 ----------------
     def pipeline_age_s(self):
-        """实时作业还活着吗：看最近一个批"跑完"到现在多久。
+        """实时作业还活着吗：取"最近一批跑完"和"空闲心跳"里更新的那个。
 
-        用开始时间加耗时，而不是开始时间：追积压时一批可能要跑十几秒，只看开始时间会把
-        正常的长批误判成作业停了。作业开了 noDataMicroBatches=false，没数据的批也会写一行，
-        所以采集器停了这里照样有新鲜的心跳（这时该报的是"采集中断"，不是"流作业停止"）。
+        两个坑（项目报告 M1 / L1）：
+        - Spark 3.5 没有新数据时只回调 onQueryIdle，rt_batch_log 不写新行；采集一停，
+          只按批次时间判断就会把"采集中断"误报成"流作业停止"。
+        - 删 checkpoint 重启后 batch_id 从 0 开始，按 batch_id 排序会取到旧行；按
+          trigger_at 才是真正的"最近"。
+
+        用"开始时间 + 耗时"而不是开始时间：追积压时一批要跑十几秒，只看开始时间会把
+        正常的长批误判成作业停了。
         """
-        return self._scalar(
+        batch = self._scalar(
             "SELECT EXTRACT(EPOCH FROM now() "
             "  - (trigger_at + trigger_ms * interval '1 millisecond'))::float "
-            "FROM rt_batch_log ORDER BY batch_id DESC LIMIT 1")
+            "FROM rt_batch_log ORDER BY trigger_at DESC LIMIT 1")
+        beat = None
+        try:
+            beat = self._scalar(
+                "SELECT EXTRACT(EPOCH FROM now() - beat_at)::float "
+                "FROM rt_heartbeat WHERE id = 1")
+        except psycopg2.errors.UndefinedTable:
+            self.conn.rollback()      # 还没启动过实时作业，没有心跳表
+        ages = [a for a in (batch, beat) if a is not None]
+        return min(ages) if ages else None
 
     def collection_age_s(self):
         return self._scalar(
@@ -160,7 +188,7 @@ class AlertEngine:
         backlog = self._rows(
             "SELECT batch_id, trigger_ms FROM rt_batch_log "
             "WHERE num_input_rows > 0 AND trigger_at > now() - interval '2 minutes' "
-            "ORDER BY batch_id DESC LIMIT "
+            "ORDER BY trigger_at DESC LIMIT "
             f"{BACKLOG_BATCHES}")
         if len(backlog) == BACKLOG_BATCHES and all(ms > BACKLOG_MS for _, ms in backlog):
             conditions.append(dict(
@@ -232,9 +260,14 @@ class AlertEngine:
     def fire(self, cond):
         """没有未恢复的同名告警就插入一行；需要推送时推送。返回是否新告警。"""
         key = cond["key"]
+        emergency = key.startswith("emergency:")
         with self.conn.cursor() as cur:
+            # 应急告警按 alert_key 查**全部历史**：同一航段同一个代码只推一次，
+            # 飞机短暂失联再出现也不重复推（项目报告 M7）。普通告警只看未恢复的。
             cur.execute(
-                "SELECT id FROM alert_event WHERE alert_key = %s AND cleared_at IS NULL", (key,))
+                "SELECT id FROM alert_event WHERE alert_key = %s"
+                + ("" if emergency else " AND cleared_at IS NULL")
+                + " ORDER BY id DESC LIMIT 1", (key,))
             if cur.fetchone():
                 cur.execute("UPDATE alert_event SET last_seen = now() "
                             "WHERE alert_key = %s AND cleared_at IS NULL", (key,))
@@ -260,7 +293,7 @@ class AlertEngine:
 
         text = (f"[{cond['level']}] {cond['title']}\n{cond['detail']}\n"
                 f"告警编号 {alert_id}，时间 {datetime.now(timezone.utc):%Y-%m-%d %H:%M:%S} UTC")
-        print(f"[alert] 新告警 {cond['level']} {cond['title']}：{cond['detail']}")
+        log(f"[alert] 新告警 {cond['level']} {cond['title']}：{cond['detail']}")
         if should_notify:
             send_webhook(text)
         return True
@@ -270,24 +303,34 @@ class AlertEngine:
         with self.conn.cursor() as cur:
             cur.execute("SELECT alert_key FROM alert_event WHERE cleared_at IS NULL")
             open_keys = [row[0] for row in cur.fetchall()]
-            gone = [k for k in open_keys if k not in active_keys]
+            # 应急告警不自动关闭：要人工确认（--ack），否则飞机短暂失联再出现
+            # 就会对同一航段重复推送（项目报告 M7）。
+            gone = [k for k in open_keys
+                    if k not in active_keys and not k.startswith("emergency:")]
             for key in gone:
                 cur.execute("UPDATE alert_event SET cleared_at = now() "
                             "WHERE alert_key = %s AND cleared_at IS NULL", (key,))
-                print(f"[alert] 已恢复：{key}")
+                log(f"[alert] 已恢复：{key}")
 
     def tick(self):
         conditions = self.evaluate()
         for cond in conditions:
             self.fire(cond)
         self.clear_stale({c["key"] for c in conditions})
+        self.close_acknowledged()
         return conditions
+
+    def close_acknowledged(self):
+        """人工确认过的告警（应急代码），下一轮标成已恢复。"""
+        with self.conn.cursor() as cur:
+            cur.execute("UPDATE alert_event SET cleared_at = acknowledged_at "
+                        "WHERE acknowledged_at IS NOT NULL AND cleared_at IS NULL")
 
 
 def send_webhook(text: str) -> None:
     """推送到飞书/钉钉机器人。没配 URL 就只打日志。"""
     if not WEBHOOK_URL:
-        print("[alert] 未配置 ALERT_WEBHOOK_URL，只记录不推送")
+        log("[alert] 未配置 ALERT_WEBHOOK_URL，只记录不推送")
         return
     if WEBHOOK_KIND == "feishu":
         payload = {"msg_type": "text", "content": {"text": text}}
@@ -302,36 +345,45 @@ def send_webhook(text: str) -> None:
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = resp.read().decode("utf-8", "replace")
-        print(f"[alert] 推送完成：HTTP {resp.status} {body[:120]}")
+        log(f"[alert] 推送完成：HTTP {resp.status} {body[:120]}")
     except Exception as e:  # noqa: BLE001 —— 推送失败不能把引擎带崩，下一轮还会再试
-        print(f"[alert] 推送失败：{e!r}")
+        log(f"[alert] 推送失败：{e!r}")
 
 
 def main() -> None:
     p = argparse.ArgumentParser(description="告警引擎：轮询服务层，写 alert_event 并推送")
     p.add_argument("--once", action="store_true", help="只检查一轮就退出（排查用）")
     p.add_argument("--no-notify", action="store_true", help="只写库，不推送")
+    p.add_argument("--ack", type=int, metavar="ID",
+                   help="人工确认一条告警（应急告警靠它关闭，见 runbook）")
     args = p.parse_args()
 
     conn = connect()
+    if args.ack:
+        with conn.cursor() as cur:
+            cur.execute(DDL)
+            cur.execute("UPDATE alert_event SET acknowledged_at = now() "
+                        "WHERE id = %s AND cleared_at IS NULL", (args.ack,))
+            log(f"[alert] 已确认告警 {args.ack}（{cur.rowcount} 行）")
+        return
     with conn.cursor() as cur:
         cur.execute(DDL)
     engine = AlertEngine(conn, notify=not args.no_notify)
 
     if args.once:
         conditions = engine.tick()
-        print(f"[alert] 本轮 {len(conditions)} 条告警")
+        log(f"[alert] 本轮 {len(conditions)} 条告警")
         for c in conditions:
-            print(f"  {c['level']} {c['title']}：{c['detail']}")
+            log(f"  {c['level']} {c['title']}：{c['detail']}")
         return
 
-    print(f"[alert] 告警引擎启动，每 {INTERVAL_S} 秒检查一次；"
+    log(f"[alert] 告警引擎启动，每 {INTERVAL_S} 秒检查一次；"
           f"推送={'开' if WEBHOOK_URL else '关（没配 webhook）'}")
     while True:
         try:
             engine.tick()
         except Exception as e:  # noqa: BLE001 —— 数据库暂时不可用时重连，不让引擎退出
-            print(f"[alert] 本轮失败：{e!r}，10 秒后重连")
+            log(f"[alert] 本轮失败：{e!r}，10 秒后重连")
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -343,7 +395,7 @@ def main() -> None:
                 conn = connect()
                 engine.conn = conn
             except Exception as e2:  # noqa: BLE001
-                print(f"[alert] 重连失败：{e2!r}，10 秒后再试")
+                log(f"[alert] 重连失败：{e2!r}，10 秒后再试")
                 time.sleep(10)
             continue
         time.sleep(INTERVAL_S)

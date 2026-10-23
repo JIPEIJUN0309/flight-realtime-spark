@@ -172,4 +172,6 @@ with DAG(
     )
 
     # 依赖：严格串行。任一步失败，后面的不会跑。
-    preflight >> dws_batch >> ads_export >> ml_features >> ml_score
+    # ★ dq_checks 必须在 ads_export 之前：强规则失败时这一步直接失败，ADS 不发布。
+    #   之前漏了这条边，dq_checks 和 dws_batch 并行跑，门禁形同虚设（项目报告 H1）。
+    preflight >> dws_batch >> dq_checks >> ads_export >> ml_features >> ml_score

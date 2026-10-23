@@ -74,7 +74,7 @@ Running both makes the trade-offs between streaming and batch — exact versus a
 | `on_ground` | Whether the aircraft is on the ground |
 | `snapshot_time` | Poll timestamp |
 
-The API enforces a **4,000 requests/day** free-tier quota. A bounding box over European airspace (the densest traffic region) plus a tuned poll interval keeps consumption at roughly **2,880 requests/day** — comfortably inside the limit while maintaining ~30-second freshness.
+The API enforces a **4,000 credits/day** free-tier quota, and one bounding-box request costs **2 credits** — so about 2,000 requests a day. A bounding box over European airspace (the densest traffic region) at a 30-second poll costs 5,760 credits/day, which runs out in about 17 hours; at 10 seconds it lasts 5.6 hours. The demo therefore runs 10 s and the steady state runs 30 s, with the daily quota reset at 00:00 UTC.
 
 ---
 
@@ -90,9 +90,9 @@ The API enforces a **4,000 requests/day** free-tier quota. A bounding box over E
 
 ### Nearest-Airport Enrichment
 
-Each aircraft position is matched against a 20-row airport dimension table with no equality key — Spark plans it as a broadcast nested loop join. The Haversine great-circle distance is computed for every candidate airport and `ROW_NUMBER()` partitioned by `(icao24, event_time)` keeps the closest one. This yields both the nearest airport and its distance without a spatial index, and leaves exactly one row per `(icao24, event_time)`.
+Each aircraft position is matched against a 22-row airport dimension table (20 airports inside the bounding box, plus VIE and SZG kept only for bearing) with no equality key — Spark plans it as a broadcast nested loop join. The Haversine great-circle distance is computed for every candidate airport and `ROW_NUMBER()` partitioned by `(icao24, event_time)` keeps the closest one. This yields both the nearest airport and its distance without a spatial index, and leaves exactly one row per `(icao24, event_time)`.
 
-The implementation goes one step further: the 20-row airport list is broadcast as an array constant and the distance is computed row-locally with higher-order functions, so the upstream data never has to be shuffled or expanded to 20× its size before deduplication.
+The implementation goes one step further: the airport list is broadcast as an array constant and the distance is computed row-locally with higher-order functions, so the upstream data never has to be shuffled or expanded to N× its size before deduplication.
 
 ---
 
@@ -252,7 +252,7 @@ Running instructions, the implementation decisions behind the module, and its kn
 
 ### Pipeline Integration
 
-Inference runs in the same batch chain and reuses the serving layer's `MERGE` helper with delete-on-missing semantics, since alerts are recomputed from the full source — changing the model or the threshold has to retire the previous run's rows rather than leave them behind. Results land in `ads_ml_anomaly` next to the existing rule alerts on the same time axis, so the two judgements can be compared directly in the dashboard.
+Inference runs in the same batch chain and reuses the serving layer's `MERGE` helper with delete-on-missing semantics, since alerts are recomputed from the full source — changing the model or the threshold has to retire the previous run's rows rather than leave them behind. Results land in `ads_ml_anomaly` next to the existing rule alerts on the same time axis, so the two judgements can be compared directly in SQL (a Grafana table panel over that table is not provisioned by default, because the table only exists after a model has been trained).
 
 **Training is deliberately not scheduled.** Inference reruns on every batch; training is an occasional model-iteration step that needs a human to read the sweep and decide whether to promote a new model. Scheduling it every 15 minutes would silently swap the production model several times an hour and make any regression impossible to trace.
 
@@ -314,8 +314,8 @@ flight-realtime-spark/
 ├── .env.example                  # Credential template
 ├── requirements.txt
 ├── ingestion/                    # OpenSky poller (Kafka producer) and OAuth2 token manager
-├── spark/                        # Streaming job, batch jobs, rules, DQ checks, alert engine
-├── airflow/                      # DAG definitions
+├── spark/                        # Streaming job, batch jobs, rules, DQ checks, alert engine, Delta maintenance
+├── airflow/                      # DAG definitions (batch chain + daily Delta maintenance)
 ├── grafana/                      # Real-time cards (provisioned datasource + dashboard)
 ├── sql/                          # Data-quality and reconciliation SQL
 ├── dim/                          # Airport dimension table
@@ -360,7 +360,7 @@ Real problems encountered and fixed during development.
    OpenSky retired username/password authentication in March 2026 in favour of OAuth2 client-credentials. Reworked the producer around a token manager that fetches a bearer token, tracks its ~1800-second lifetime, and refreshes ahead of expiry so long-running polls never fail on a stale token.
 
 2. **A daily quota that a naive poller burns through by noon.**
-   The free tier allows 4,000 requests/day. Polling globally at a short interval exhausts it quickly. Constraining the query to a European bounding box and tuning the poll interval brought steady-state usage to ~2,880 requests/day while keeping data roughly 30 seconds fresh.
+   The free tier allows 4,000 credits/day at 2 credits per bounding-box request. Polling globally at a short interval exhausts that quickly; constraining the query to a European bounding box and dropping to one request every 30 seconds keeps steady-state use at 5,760 credits/day (under 17 hours of continuous collection), and the collector is restarted after the 00:00 UTC reset.
    *Lesson: rate limits are a design input, not an afterthought.*
 
 3. **Distinct counts are not supported on streams.**
@@ -399,9 +399,11 @@ Real problems encountered and fixed during development.
 - The streaming window aggregates (`gold_overview_stream`) are written to Delta but not served; the dashboards follow the real-time serving layer and the 15-minute batch path.
 - PostgreSQL statistics tables are refreshed with a full JDBC overwrite, which is not atomic: a dashboard query during the write can see an empty table. A staging table plus a transactional swap would fix it. The real-time tables do not have this problem — they are upserted inside a transaction.
 - Kafka runs as a single broker with an auto-created single partition, so the replication factor is 1, `acks=all` is effectively `acks=1`, and there is no consumer parallelism.
-- Bronze is written every 5 seconds and its small files are not compacted yet (Delta `OPTIMIZE`); the file count is the main driver of table-listing cost at this scale.
+- Bronze and the state detail are appended every 5 seconds, one small file per batch; the daily `flight_maintenance` DAG runs `OPTIMIZE` on them and `VACUUM` on every table, but between runs the file count is the main driver of table-listing cost.
+- The Airflow containers mount the host Docker socket so tasks can docker exec spark; that is equivalent to root on the host and is only acceptable for a local demo. A production deployment would run the jobs in the Airflow image itself (or via a KubernetesPodOperator) instead.
 - The alert engine runs as a plain polling process. It is restart-safe (alerts are stored in PostgreSQL) but it is not clustered: running two instances would double-notify unless the dedupe table is used as the lock.
 - The statistics dashboard refresh is limited by the 15-minute batch chain, so the hourly and traffic panels lag the live cards by up to one DAG interval.
+- Per-batch latency misses its 5-second target: P50 5.5 s, P95 6.2 s, and 97.5% of batches exceed 5 s at daytime traffic. The cost is fixed overhead (about 100 Spark jobs per batch, each compiling generated code), not data volume — raising the codegen class cache is the next experiment. The backlog alert threshold is therefore tied to the 10-second processing-latency SLA, not to the 5-second trigger interval.
 
 ---
 

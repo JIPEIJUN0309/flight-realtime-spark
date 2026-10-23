@@ -28,7 +28,7 @@ CREATE TABLE rt_batch_log (
     trigger_ms int, add_batch_ms int, compute_ms int, pg_ms int, delta_ms int, sync_seq bigint,
     PRIMARY KEY (query_id, batch_id)
 );
-CREATE TABLE rt_heartbeat (id int PRIMARY KEY, at timestamptz);
+CREATE TABLE rt_heartbeat (id int PRIMARY KEY, beat_at timestamptz);
 CREATE TABLE rt_sync_state (
     id int PRIMARY KEY, seq bigint, kind text, batch_id bigint, data_clock timestamptz,
     synced_at timestamptz, latest_changed int, legs_changed int, events_changed int
@@ -73,6 +73,7 @@ def healthy(eng, pipeline_age=2, data_age=10):
         cur.execute(
             "INSERT INTO rt_sync_state (id, seq, data_clock, synced_at) "
             "VALUES (1, 1, now() - interval '{} seconds', now())".format(data_age))
+        cur.execute("DELETE FROM rt_heartbeat")
         cur.execute("DELETE FROM ads_latest_position")
         cur.execute(
             "INSERT INTO ads_latest_position (icao24, event_time, callsign, squawk, departed) "
@@ -136,7 +137,7 @@ def test_batch_backlog_needs_three_slow_batches(engine):
         cur.execute("DELETE FROM rt_batch_log")
         for i in range(3):
             cur.execute(
-                "INSERT INTO rt_batch_log VALUES ('q', {}, now(), 160, 6000, 5000, 4000, 300, 1500, {})"
+                "INSERT INTO rt_batch_log VALUES ('q', {}, now(), 160, 9000, 5000, 4000, 300, 1500, {})"
                 .format(i, i))
     assert "batch_backlog" in keys_of(engine.evaluate())
 
@@ -161,10 +162,26 @@ def test_emergency_squawk_is_reported_once_per_leg(engine):
         assert cur.fetchone()[0] == 1
     assert open_alerts(engine) == 1
 
-    # 航段落地：下一轮把告警标成恢复，也不会退回按飞机去重再报一次
+    # 航段落地：应急告警不自动关闭，等人工确认（项目报告 M7）
     with engine.conn.cursor() as cur:
         cur.execute("UPDATE dwd_flight_leg SET status = 'LANDED'")
     engine.tick()
+    assert open_alerts(engine) == 1
+
+    # 人工确认后下一轮才标成恢复
+    with engine.conn.cursor() as cur:
+        cur.execute("UPDATE alert_event SET acknowledged_at = now() "
+                    "WHERE alert_key = 'emergency:abc123_1:7700'")
+    engine.tick()
+    assert open_alerts(engine) == 0
+
+    # 同一航段再次出现：不再推第二次（按 alert_key 查全部历史）
+    with engine.conn.cursor() as cur:
+        cur.execute("UPDATE dwd_flight_leg SET status = 'IN_AIR'")
+    engine.tick()
+    with engine.conn.cursor() as cur:
+        cur.execute("SELECT count(*) FROM alert_event WHERE alert_key = 'emergency:abc123_1:7700'")
+        assert cur.fetchone()[0] == 1
     assert open_alerts(engine) == 0
 
 
@@ -204,3 +221,16 @@ def test_card_stale_needs_to_hold_for_a_minute(engine):
     # 把"第一次发现"往前推 61 秒，模拟条件已持续
     engine._sick_since["card_stale"] = time.time() - 61
     assert "card_stale" in keys_of(engine.evaluate())
+
+def test_idle_heartbeat_keeps_pipeline_alive(engine):
+    """采集停了（没有新批次），但作业还在写心跳：不能报"流作业停止"（项目报告 M1）。"""
+    healthy(engine, pipeline_age=40)
+    with engine.conn.cursor() as cur:
+        cur.execute("INSERT INTO rt_heartbeat (id, beat_at) VALUES (1, now()) "
+                    "ON CONFLICT (id) DO UPDATE SET beat_at = EXCLUDED.beat_at")
+    assert "pipeline_stalled" not in keys_of(engine.evaluate())
+
+    # 心跳也停了：这才是真的停了
+    with engine.conn.cursor() as cur:
+        cur.execute("UPDATE rt_heartbeat SET beat_at = now() - interval '60 seconds'")
+    assert "pipeline_stalled" in keys_of(engine.evaluate())

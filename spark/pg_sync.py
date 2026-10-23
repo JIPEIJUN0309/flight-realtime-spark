@@ -441,10 +441,15 @@ $$""")
     objects = list(tables) + VIEWS + ["rt_sync_state", "rt_sync_log", "rt_batch_log"]
     client.execute(f"GRANT USAGE ON SCHEMA public TO {READER_ROLE}")
     client.execute(f"GRANT SELECT ON {', '.join(objects)} TO {READER_ROLE}")
+    # ★ 默认权限：以后新建 / 重建的表（dq_result 每 15 分钟重建一次、告警引擎自己建的
+    #   alert_event）自动可读，不用再靠"实时作业重启时补一次"这种碰运气的时机。
+    client.execute(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+                   f"GRANT SELECT ON TABLES TO {READER_ROLE}")
     # 统计报表那几张表由批链路/告警引擎建，启动时可能还不存在：存在才授权。
     # 每次启动都跑一遍，表被重建后权限也能自动补回来。
     stats = ["ads_airport_traffic", "ads_airport_hourly", "ads_country_share",
-             "ads_realtime_kpi", "ads_flight_alert", "dq_result", "alert_event"]
+             "ads_realtime_kpi", "ads_flight_alert", "dq_result", "alert_event",
+             "rt_heartbeat"]
     arrays = ", ".join(f"'{t}'" for t in stats)
     client.execute(f"""
 DO $$

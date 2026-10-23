@@ -70,12 +70,12 @@
 | DWD | dwd_flight_leg（新增，累积快照） | 一个航段，从首次出现到落地或飞出覆盖 | leg_id | 流式 foreachBatch + MERGE，进行中持续更新 | 5 秒 |
 | DWS | dws_airport_5min（现 gold_airport_5min） | 一个机场一个 5 分钟窗口 | (window_start, airport_iata) | 按时间区间覆盖 | 15 分钟 |
 | DWS | dws_airport_hourly（新增） | 一个机场一个 UTC 小时的起降统计 | (hour_start, airport_iata) | 按时间区间覆盖 | 15 分钟 |
-| ADS | ads_latest_position（改造） | 每架飞机的最新状态 | icao24 | 流式 MERGE，加“已离开”标记 | 5 秒 |
+| ADS | ads_latest_position（改造） | 每架飞机的最新状态 | icao24 | 每批按主键整段替换（`replace_rows`），含“已离开”标记 | 5 秒 |
 | ADS | ads_flight_alert、ads_ml_anomaly | 一条异常告警 | (icao24, event_time, alert_type) | MERGE 同步，删除只限重算区间 | 15 分钟 |
 | 服务层 | PostgreSQL 实时表（最新状态、航段、起降事件） | 同上游 | 同上游 | 与湖内写入同一个微批，三张表在一个事务里按主键 upsert | 5 秒 |
-| 服务层 | PostgreSQL 统计表（DWS、告警） | 同上游 | 同上游 | Change Data Feed 增量同步 | 15 分钟 |
+| 服务层 | PostgreSQL 统计表（ADS 5 张 + dq_result） | 同上游 | 同上游 | truncate 后整表写入（非原子，见 README 已知限制） | 15 分钟 |
 
-其余现有表（gold_country_5min、gold_overview_5min、gold_overview_stream 及对应 ADS 表）沿用，只按本文档统一字段名。dwd_flight_state 比现在的 silver_flights 多保留 on_ground 和 squawk 两列，起降判定和应急告警都依赖它们。实时表在同一个微批里先 upsert 到 PostgreSQL（三张表一个事务），再写进湖，两边都按主键幂等，微批失败重放不会写重；湖是事实来源，实时作业每次启动先把 PostgreSQL 按湖全量对齐。
+其余现有表（gold_country_5min、gold_overview_5min、gold_overview_stream 及对应 ADS 表）沿用，只按本文档统一字段名。dwd_flight_state 比现在的 silver_flights 多保留 on_ground 和 squawk 两列，起降判定和应急告警都依赖它们。实时表在同一个微批里同时写湖和 PostgreSQL：湖先写、PG 三张表在一个事务里 upsert，状态明细最后提交，失败就整批从 checkpoint 重放。PG 失败时湖里可能留下 PG 还没有的行，靠实时作业启动时按湖全量对齐补上。两边都按主键幂等，重放不会写重；湖是事实来源。
 
 ## 指标口径
 
@@ -174,16 +174,16 @@
 
 | 级别 | 告警 | 触发条件 | 通知 | 处理人 | 关闭条件 |
 | --- | --- | --- | --- | --- | --- |
-| P1 | 应急代码 | squawk 为 7500、7600 或 7700，同一航段同一代码只推一次 | 飞书或钉钉机器人，即时 | 运行值班员 | 人工确认 |
+| P1 | 应急代码 | squawk 为 7500、7600 或 7700，同一航段同一代码只推一次 | 飞书或钉钉机器人，即时 | 运行值班员 | 人工确认（`alert_engine.py --ack <id>`）；不随条件消失自动关闭 |
 | P1 | 采集中断 | 连续 30 秒（3 轮）没有新快照写入 ODS | 即时 | 数据值班 | 恢复写入后自动关闭 |
-| P1 | 流作业停止 | 流式查询连续 3 个触发周期（约 15 秒）没有进度 | 即时 | 数据值班 | 进度恢复后自动关闭 |
+| P1 | 流作业停止 | 作业进程不存在，或最近一批 / 空闲心跳超过 15 秒没有前进 | 即时 | 数据值班 | 进度恢复后自动关闭 |
 | P2 | 实时卡片超时 | 端到端新鲜度超过 30 秒，持续 1 分钟 | 即时 | 数据值班 | 回到 30 秒内并持续 1 分钟 |
-| P2 | 微批积压 | 单批处理耗时连续 3 批超过 5 秒的触发间隔 | 即时 | 数据值班 | 回到触发间隔以内 |
+| P2 | 微批积压 | 单批处理耗时连续 3 批超过 8 秒（处理延迟 SLA 10 秒的 80%） | 即时 | 数据值班 | 回到 8 秒以内 |
 | P2 | 批任务失败 | Airflow 任务重试后仍失败 | 即时 | 数据值班 | 重跑成功 |
 | P2 | 质量强规则失败 | 见“数据质量规则”，该区间的 ADS 不发布 | 即时 | 数据值班 | 修复后重跑通过 |
-| P2 | 航迹异常 | ads_flight_alert 有新增 | 每 15 分钟汇总推送 | 运行值班员 | 人工确认 |
+| P2 | 航迹异常 | ads_flight_alert 有新增 | 每 15 分钟汇总推送（**当前未实现**：告警只写表，靠看板查看） | 运行值班员 | 人工确认 |
 | P3 | 模型异常 | ads_ml_anomaly 有新增 | 只进看板，不推送（观察期） | 数据值班 | 无需关闭 |
-| P3 | 质量弱规则 | 见“数据质量规则” | 每日 08:00（苏黎世时间）日报 | 数据值班 | 无需关闭 |
+| P3 | 质量弱规则 | 见“数据质量规则” | 每日 08:00（苏黎世时间）日报（**当前未实现**：弱规则结果只写 dq_result） | 数据值班 | 无需关闭 |
 
 ## 数据质量规则
 
